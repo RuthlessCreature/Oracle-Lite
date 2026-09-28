@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 import signal
+import shutil
+import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 import psutil
 
@@ -23,6 +25,8 @@ class MemoryPolicy:
     max_worker_rss_bytes: int
     max_worker_address_space_bytes: int
     max_swap_growth_bytes: int
+    cgroup_memory_max_bytes: int
+    cgroup_swap_max_bytes: int
 
     @classmethod
     def auto(cls) -> "MemoryPolicy":
@@ -39,6 +43,8 @@ class MemoryPolicy:
             max_worker_rss_bytes=worker_rss,
             max_worker_address_space_bytes=worker_as,
             max_swap_growth_bytes=512 * MIB,
+            cgroup_memory_max_bytes=max(4 * GIB, total - reserve),
+            cgroup_swap_max_bytes=512 * MIB,
         )
 
     def as_dict(self) -> dict[str, int | float]:
@@ -48,14 +54,89 @@ class MemoryPolicy:
             "max_worker_rss_bytes": self.max_worker_rss_bytes,
             "max_worker_address_space_bytes": self.max_worker_address_space_bytes,
             "max_swap_growth_bytes": self.max_swap_growth_bytes,
+            "cgroup_memory_max_bytes": self.cgroup_memory_max_bytes,
+            "cgroup_swap_max_bytes": self.cgroup_swap_max_bytes,
             "reserve_system_gb": round(self.reserve_system_bytes / GIB, 2),
             "max_worker_rss_gb": round(self.max_worker_rss_bytes / GIB, 2),
             "max_worker_address_space_gb": round(
                 self.max_worker_address_space_bytes / GIB, 2
             ),
             "max_swap_growth_gb": round(self.max_swap_growth_bytes / GIB, 2),
+            "cgroup_memory_max_gb": round(self.cgroup_memory_max_bytes / GIB, 2),
+            "cgroup_swap_max_gb": round(self.cgroup_swap_max_bytes / GIB, 2),
         }
 
+
+
+MEMORY_SCOPE_ENV = "ORACLE_LITE_MEMORY_SCOPE"
+
+
+def build_systemd_memory_scope_command(
+    policy: MemoryPolicy,
+    argv: Sequence[str] | None = None,
+) -> list[str]:
+    """Build the fail-closed systemd scope command used on Linux/Ubuntu."""
+    systemd_run = shutil.which("systemd-run")
+    env_bin = shutil.which("env")
+    if not systemd_run:
+        raise RuntimeError(
+            "systemd-run is required for Oracle-Lite Linux hard memory fence."
+        )
+    if not env_bin:
+        raise RuntimeError("env executable is required for Oracle-Lite memory scope.")
+
+    forwarded = list(sys.argv[1:] if argv is None else argv)
+    return [
+        systemd_run,
+        "--user",
+        "--scope",
+        "--quiet",
+        "-p",
+        f"MemoryMax={policy.cgroup_memory_max_bytes}",
+        "-p",
+        f"MemorySwapMax={policy.cgroup_swap_max_bytes}",
+        env_bin,
+        f"{MEMORY_SCOPE_ENV}=1",
+        sys.executable,
+        "-m",
+        "oracle_lite.cli",
+        *forwarded,
+    ]
+
+
+def ensure_linux_memory_scope(
+    policy: MemoryPolicy,
+    argv: Sequence[str] | None = None,
+) -> bool:
+    """Re-exec Oracle-Lite inside a user systemd/cgroup hard memory fence."""
+    if sys.platform != "linux":
+        return False
+    if os.environ.get(MEMORY_SCOPE_ENV) == "1":
+        return False
+
+    systemd_run = shutil.which("systemd-run")
+    if not systemd_run:
+        raise RuntimeError(
+            "Oracle-Lite refuses to run memory-heavy work on Linux without "
+            "systemd-run/cgroup memory isolation."
+        )
+
+    probe = subprocess.run(
+        [systemd_run, "--user", "--scope", "--quiet", "true"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout or "").strip()
+        raise RuntimeError(
+            "Oracle-Lite could not establish the required user cgroup memory "
+            f"scope and will not run unguarded. systemd-run: {detail or probe.returncode}"
+        )
+
+    command = build_systemd_memory_scope_command(policy, argv=argv)
+    os.execv(command[0], command)
+    return True
 
 def apply_linux_address_space_limit(limit_bytes: int) -> bool:
     """Hard-cap parser worker virtual memory before opening source content."""
