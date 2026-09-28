@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import shutil
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +14,7 @@ DEFAULT_EXTENSIONS = {
     ".txt", ".md", ".json", ".jsonl", ".csv",
     ".pdf", ".docx", ".pptx",
     ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff",
+    ".stp", ".step", ".x_t", ".x_b",
 }
 DEFAULT_IGNORE_NAMES = {".git", ".oracle", "__pycache__"}
 ALLOWED_CONFIG_KEYS = {"minimax_api_key", "corpus_dir", "output_dir"}
@@ -30,7 +34,7 @@ class AppConfig:
     output_dir: Path
 
     # Internal defaults: intentionally not user-facing configuration.
-    parser_version: str = field(default="v4-resource-admission", init=False)
+    parser_version: str = field(default="v5-cad-corpus-isolation", init=False)
     hash_algorithm: str = field(default="sha256", init=False)
     include_extensions: set[str] = field(default_factory=lambda: set(DEFAULT_EXTENSIONS), init=False)
     ignore_names: set[str] = field(default_factory=lambda: set(DEFAULT_IGNORE_NAMES), init=False)
@@ -40,8 +44,19 @@ class AppConfig:
         return [self.corpus_dir]
 
     @property
+    def corpus_id(self) -> str:
+        """Stable namespace derived only from the canonical corpus root path."""
+        canonical = str(self.corpus_dir.expanduser().resolve())
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+        return f"corpus-{digest}"
+
+    @property
+    def corpus_output_dir(self) -> Path:
+        return self.output_dir / "_corpora" / self.corpus_id
+
+    @property
     def state_dir(self) -> Path:
-        return self.output_dir / "_state"
+        return self.corpus_output_dir / "_state"
 
     @property
     def registry_path(self) -> Path:
@@ -49,19 +64,19 @@ class AppConfig:
 
     @property
     def canonical_dir(self) -> Path:
-        return self.output_dir / "canonical"
+        return self.corpus_output_dir / "canonical"
 
     @property
     def assets_dir(self) -> Path:
-        return self.output_dir / "assets"
+        return self.corpus_output_dir / "assets"
 
     @property
     def snapshots_dir(self) -> Path:
-        return self.output_dir / "snapshots"
+        return self.corpus_output_dir / "snapshots"
 
     @property
     def datasets_dir(self) -> Path:
-        return self.output_dir / "datasets"
+        return self.corpus_output_dir / "datasets"
 
     @property
     def models_dir(self) -> Path:
@@ -69,16 +84,50 @@ class AppConfig:
 
     @property
     def training_dir(self) -> Path:
-        return self.output_dir / "training"
+        return self.corpus_output_dir / "training"
 
     @property
     def logs_dir(self) -> Path:
-        return self.output_dir / "logs"
+        return self.corpus_output_dir / "logs"
+
+    def _migrate_legacy_single_corpus_state(self) -> None:
+        """Reuse v0.4 registry only when every recorded root is this corpus."""
+        legacy_registry = self.output_dir / "_state" / "registry.sqlite3"
+        if self.registry_path.exists() or not legacy_registry.exists():
+            return
+        try:
+            conn = sqlite3.connect(legacy_registry)
+            try:
+                roots = {
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT DISTINCT root FROM source_files WHERE root IS NOT NULL"
+                    )
+                }
+            finally:
+                conn.close()
+        except Exception:
+            return
+        expected = str(self.corpus_dir.resolve())
+        if roots != {expected}:
+            return
+
+        # Move the entire legacy generated state under this corpus namespace.
+        # Models remain shared at output_dir/models and are intentionally untouched.
+        for name in ("_state", "canonical", "assets", "snapshots", "datasets", "training", "logs"):
+            source = self.output_dir / name
+            target = self.corpus_output_dir / name
+            if not source.exists() or target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
 
     def ensure_dirs(self) -> None:
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_single_corpus_state()
         for path in (
             self.output_dir,
+            self.corpus_output_dir,
             self.state_dir,
             self.canonical_dir,
             self.assets_dir,

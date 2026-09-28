@@ -2,7 +2,7 @@
 
 Local-first **multimodal** dataset factory and domain-model training pipeline.
 
-Oracle-Lite V0.4.4 is built around these fixed assumptions:
+Oracle-Lite V0.5.0 is built around these fixed assumptions:
 
 - corpus files live in one continuously changing local folder;
 - text, images, PDF pages, Word media and PowerPoint media are first-class source material;
@@ -29,7 +29,7 @@ All parser settings, model ID, model download path, hashing, snapshot layout and
 
 Oracle-Lite always walks the corpus directory on startup so it can discover new, deleted or renamed files, but it does **not** recompute SHA-256 for unchanged files. If path, size and nanosecond mtime match the registry, the existing content hash is reused immediately.
 
-After upgrading to V0.4.4, existing SHA-256 values are still reused. The parser version is `v4-resource-admission`, so existing sources are reparsed once into the bounded Canonical format; subsequent runs reuse those Canonical artifacts too.
+V0.5.0 gives every canonical `corpus_dir` path a stable `corpus_id`. Registry, Canonical assets, snapshots, datasets, training outputs and logs live under `output_dir/_corpora/<corpus_id>/`. Switching `corpus_dir` therefore cannot mix active files, snapshots or training state. Switching back returns to that corpus's own hash cache. A v0.4 single-corpus registry is migrated automatically only when every recorded root exactly matches the current `corpus_dir`; ambiguous/mixed legacy state is never imported.
 
 ## What is multimodal here?
 
@@ -43,6 +43,7 @@ dynamic corpus
   +-- DOCX
   +-- PPTX
   +-- PNG / JPG / JPEG / WEBP / BMP / TIFF
+  +-- STEP / STP / Parasolid X_T / X_B mechanical CAD
   |
   v
 SHA-256 Registry
@@ -88,6 +89,17 @@ Each slide preserves:
 ### DOCX
 
 Word text/tables are retained and raster media inside the document are extracted as visual assets.
+
+### Mechanical 3D CAD
+
+`.stp` / `.step` and Parasolid `.x_t` / `.x_b` are first-class corpus sources.
+
+- the original CAD file is preserved losslessly as a Canonical asset;
+- STEP is scanned in bounded streaming mode for schema and deterministic entity/type statistics;
+- X_T is scanned conservatively for published transmit/schema metadata and coarse node tokens;
+- X_B is preserved as an opaque binary geometry asset rather than guessed into text;
+- these metadata summaries are **not** treated as authoritative geometric labels;
+- exact B-Rep/topology/tessellation/render supervision requires a CAD kernel stage and remains isolated from the core parser.
 
 ### Native images
 
@@ -303,24 +315,26 @@ Hash identity prevents duplicate parsing and treats renames/moves as the same co
 
 ```text
 output_dir/
-├── _state/
-│   └── registry.sqlite3
-├── assets/
-├── canonical/
-├── snapshots/
-├── datasets/
-├── models/
-│   └── Qwen3.5-9B-Base/
-├── training/
-└── logs/
+├── _corpora/
+│   └── corpus-<stable-id>/
+│       ├── _state/registry.sqlite3
+│       ├── assets/
+│       ├── canonical/
+│       ├── snapshots/
+│       ├── datasets/
+│       ├── training/
+│       └── logs/
+└── models/
+    └── Qwen3.5-9B-Base/
 ```
 
-## Known V0.4.4 limits
+## Known V0.5.0 limits
 
 - scanned PDF pages are visually preserved but OCR is not yet used as a deterministic label source;
 - PPTX embedded raster images are preserved, but the entire slide is not rendered into one screenshot;
 - DOCX media-to-paragraph anchoring is coarse;
 - vision tower base weights are frozen on the 4080 preset;
+- exact CAD B-Rep/topology/tessellation/render supervision is not yet generated; v0.5.0 preserves CAD truth and deterministic metadata without inventing geometry labels;
 - true large-scale multimodal continued pretraining is outside a single 16GB GPU envelope.
 
 ## Development

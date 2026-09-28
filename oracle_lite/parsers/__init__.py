@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .image import parse_image
+from .cad import parse_parasolid_xb, parse_parasolid_xt, parse_step
 from .json_parser import parse_json_like
 from .office import parse_docx, parse_pdf, parse_pptx
 from .text import parse_text_like
@@ -28,5 +29,11 @@ def parse_file(path: str | Path, *, asset_dir: str | Path):
         return parse_pptx(path, asset_dir)
     if ext in IMAGE_EXTENSIONS:
         return parse_image(path, asset_dir)
+    if ext in {".stp", ".step"}:
+        return parse_step(path, asset_dir)
+    if ext == ".x_t":
+        return parse_parasolid_xt(path, asset_dir)
+    if ext == ".x_b":
+        return parse_parasolid_xb(path, asset_dir)
 
     raise ValueError(f"Unsupported file type: {ext}")
