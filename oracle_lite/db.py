@@ -232,3 +232,50 @@ class Registry:
     def get_snapshot(self, snapshot_id: str):
         with self.connect() as conn:
             return conn.execute("SELECT * FROM snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
+
+    def active_ready_hashes(self, parser_version: str) -> set[str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT DISTINCT sf.content_hash
+                   FROM source_files sf
+                   JOIN derived_artifacts da
+                     ON da.content_hash=sf.content_hash
+                    AND da.parser_version=?
+                   WHERE sf.status='active'
+                     AND da.status='ready'
+                     AND da.canonical_path IS NOT NULL""",
+                (parser_version,),
+            ).fetchall()
+            return {row["content_hash"] for row in rows}
+
+    def latest_snapshot(self, mode: str | None = None):
+        with self.connect() as conn:
+            if mode is None:
+                return conn.execute(
+                    "SELECT * FROM snapshots ORDER BY created_at DESC, snapshot_id DESC LIMIT 1"
+                ).fetchone()
+            return conn.execute(
+                """SELECT * FROM snapshots
+                   WHERE mode=?
+                   ORDER BY created_at DESC, snapshot_id DESC
+                   LIMIT 1""",
+                (mode,),
+            ).fetchone()
+
+    def latest_training_run(self, snapshot_id: str, kind: str | None = None):
+        with self.connect() as conn:
+            if kind is None:
+                return conn.execute(
+                    """SELECT * FROM training_runs
+                       WHERE snapshot_id=?
+                       ORDER BY started_at DESC, run_id DESC
+                       LIMIT 1""",
+                    (snapshot_id,),
+                ).fetchone()
+            return conn.execute(
+                """SELECT * FROM training_runs
+                   WHERE snapshot_id=? AND kind=?
+                   ORDER BY started_at DESC, run_id DESC
+                   LIMIT 1""",
+                (snapshot_id, kind),
+            ).fetchone()
