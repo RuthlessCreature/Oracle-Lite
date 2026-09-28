@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.4 - 2026-09-28
+
+### Hard resource safety
+- Removed active parser `terminate()/kill()` recovery paths. Resource pressure now uses admission control and waiting.
+- Added unified RAM / disk / VRAM resource policy without adding user config fields.
+- Parser start is gated by host RAM; Linux `RLIMIT_AS` remains the allocation ceiling.
+- Memory/disk resource events are retryable and never stored as failed artifacts.
+- Added disk reserve checks to scanner temp indexes, Canonical/PDF/Office writes, Dataset shards, model download, snapshot DB writes and training/checkpoint boundaries.
+- Added bounded PDF page pixel-area rasterization.
+- Added RTX 4080 VRAM admission before model load and every training step.
+- Capped model device placement to 12 GiB GPU and kept 2.5 GiB step reserve.
+- CUDA OOM now lowers visual/text footprint and retries instead of ending the process.
+- Training JSONL is loaded with `streaming=True`; no Arrow dataset materialization/cache is required.
+- Scanner seen paths are persisted in a temporary SQLite index instead of a corpus-sized Python set.
+- Ingest iterates active content with a cursor; snapshot matching uses SQL `EXCEPT` rather than Python hash sets.
+- Full and incremental snapshots stream members and use bounded DB batches.
+- SQLite temp operations are forced to disk with an approximately 64 MiB page cache.
+- Console logs rotate at 50 MiB with three rotations.
+- Parser version is now `v4-resource-admission`; SHA-256 registry hashes are still reused.
+
+### Configuration
+Still exactly three user fields:
+- `minimax_api_key`
+- `corpus_dir`
+- `output_dir`
+
 ## 0.4.2 - 2026-09-28
 
 ### Fixed
