@@ -1,0 +1,6 @@
+# Copy this file to ./oracle.yaml.
+# oracle.yaml is gitignored because it contains your MiniMax Token Plan key.
+
+minimax_api_key: "sk-cp-REPLACE_ME"
+corpus_dir: "D:/OracleLite/corpus"
+output_dir: "D:/OracleLite/output"

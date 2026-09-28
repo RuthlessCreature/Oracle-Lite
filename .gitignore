@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Local secret-bearing config
+oracle.yaml
+
+# Oracle-Lite runtime state / large local data
+.oracle/
+corpus/
+output/
+outputs/
+models/
+checkpoints/
+*.safetensors
+*.bin
+*.gguf
