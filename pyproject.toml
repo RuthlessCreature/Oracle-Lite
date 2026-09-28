@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oracle-lite"
+version = "0.1.0"
+description = "Local-first dataset factory and incremental training pipeline for domain LLMs"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "typer>=0.12",
+  "rich>=13.7",
+  "PyYAML>=6.0",
+  "pypdf>=5.0",
+  "python-docx>=1.1",
+  "python-pptx>=1.0",
+]
+
+[project.optional-dependencies]
+train = [
+  "torch>=2.4",
+  "transformers>=4.46",
+  "datasets>=3.0",
+  "accelerate>=1.0",
+  "peft>=0.13",
+  "bitsandbytes>=0.44",
+]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.7",
+]
+
+[project.scripts]
+oracle-lite = "oracle_lite.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["oracle_lite*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
