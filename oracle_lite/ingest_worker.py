@@ -174,11 +174,12 @@ def _stream_office_source(source: Path, asset_dir: Path, sidecar_tmp: Path) -> t
         return segments, len(copied_images)
 
 
-def _stream_pdf_source(source: Path, asset_dir: Path, sidecar_tmp: Path) -> tuple[int, int]:
+def _stream_pdf_source(source: Path, asset_dir: Path, sidecar_tmp: Path, *, memory_level: int = 1) -> tuple[int, int]:
     import pymupdf as fitz
 
     asset_dir.mkdir(parents=True, exist_ok=True)
     doc = fitz.open(source)
+    scale = {1: 1.0, 2: 0.75, 3: 0.5}.get(max(1, int(memory_level)), 0.5)
     segments = 0
     visual_segments = 0
     try:
@@ -186,7 +187,7 @@ def _stream_pdf_source(source: Path, asset_dir: Path, sidecar_tmp: Path) -> tupl
             for page_index in range(doc.page_count):
                 page = doc.load_page(page_index)
                 text = page.get_text("text").strip()
-                pix = page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0), alpha=False)
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
                 image_path = asset_dir / f"page-{page_index + 1:05d}.png"
                 pix.save(str(image_path))
                 if _append_segment(
@@ -196,6 +197,7 @@ def _stream_pdf_source(source: Path, asset_dir: Path, sidecar_tmp: Path) -> tupl
                     metadata={
                         "kind": "pdf_page_low_memory",
                         "page": page_index + 1,
+                        "raster_scale": scale,
                     },
                 ):
                     segments += 1
@@ -216,6 +218,7 @@ def _stream_low_memory_canonical(
     canonical_path: Path,
     content_hash: str,
     parser_version: str,
+    memory_level: int = 1,
 ) -> dict:
     sidecar = canonical_path.with_suffix(canonical_path.suffix + ".segments.jsonl")
     sidecar_tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
@@ -226,8 +229,8 @@ def _stream_low_memory_canonical(
         segments, visual_segments = _stream_text_source(source, sidecar_tmp)
         metadata = {"extension": ext, "low_memory_mode": True, "raw_stream": True}
     elif ext == ".pdf":
-        segments, visual_segments = _stream_pdf_source(source, asset_dir, sidecar_tmp)
-        metadata = {"extension": ext, "low_memory_mode": True}
+        segments, visual_segments = _stream_pdf_source(source, asset_dir, sidecar_tmp, memory_level=memory_level)
+        metadata = {"extension": ext, "low_memory_mode": True, "memory_level": memory_level}
     elif ext in {".docx", ".pptx"}:
         segments, visual_segments = _stream_office_source(source, asset_dir, sidecar_tmp)
         metadata = {"extension": ext, "low_memory_mode": True}
@@ -296,6 +299,7 @@ def parse_and_write_canonical(
     result_queue,
     address_space_limit_bytes: int,
     low_memory: bool = False,
+    memory_level: int = 0,
 ) -> None:
     """Parse exactly one source file inside an isolated, memory-capped worker."""
     hard_limit_applied = apply_linux_address_space_limit(address_space_limit_bytes)
@@ -311,6 +315,7 @@ def parse_and_write_canonical(
                 canonical_path=canonical,
                 content_hash=content_hash,
                 parser_version=parser_version,
+                memory_level=memory_level,
             )
             result_queue.put({
                 "ok": True,
