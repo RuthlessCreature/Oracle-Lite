@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 - 2026-09-28
+
+### Fixed
+- Corpus scanning now streams live progress to the Web Training Console instead of updating only after the full scan completes.
+- Large-file SHA-256 hashing reports processed bytes and percentage while the file is being hashed.
+- The dashboard shows the current file being scanned and live hash progress, eliminating the appearance of a frozen first-run scan.
+
 ## 0.4.0 - 2026-09-28
 
 ### Added
