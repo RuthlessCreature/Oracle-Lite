@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oracle-lite"
-version = "0.1.0"
-description = "Local-first dataset factory and incremental training pipeline for domain LLMs"
+version = "0.2.0"
+description = "Local-first multimodal dataset factory and incremental domain-model training pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -14,18 +14,21 @@ dependencies = [
   "PyYAML>=6.0",
   "requests>=2.32",
   "pypdf>=5.0",
+  "PyMuPDF>=1.25",
+  "Pillow>=11.0",
   "python-docx>=1.1",
   "python-pptx>=1.0",
+  "huggingface-hub>=0.30",
 ]
 
 [project.optional-dependencies]
 train = [
-  "torch>=2.4",
-  "transformers>=4.46",
+  "torch>=2.6",
+  "transformers>=5.11",
   "datasets>=3.0",
   "accelerate>=1.0",
-  "peft>=0.13",
-  "bitsandbytes>=0.44",
+  "peft>=0.15",
+  "bitsandbytes>=0.45",
 ]
 dev = [
   "pytest>=8.0",
