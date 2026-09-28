@@ -34,9 +34,9 @@ RTX4080_16GB_MULTIMODAL_PRESET = {
     "lora_dropout": 0.05,
     "target_modules": "all-linear",
     "exclude_modules": r".*(?:visual|vision).*",
-    "text_max_length": 2048,
-    "visual_text_max_chars": 4000,
-    "vision_max_pixels": 393_216,
+    "text_max_length": 1024,
+    "visual_text_max_chars": 2000,
+    "vision_max_pixels": 196_608,
     "micro_batch_size": 1,
     "gradient_accumulation_steps": 32,
     "gradient_checkpointing": True,
@@ -302,6 +302,12 @@ def run_domain_training(
 
     policy = HostResourcePolicy.auto(app_cfg.output_dir)
     cfg = dict(RTX4080_16GB_MULTIMODAL_PRESET)
+    runtime_backoff = {
+        "requested": False,
+        "reason": None,
+        "free_bytes": None,
+        "step": None,
+    }
 
     def _wait_state(kind: str, state: dict, resume_phase: str, resume_label: str) -> None:
         if monitor is None:
@@ -452,21 +458,67 @@ def run_domain_training(
             self._push(state)
 
         def on_step_begin(self, args, state, control, **kwargs):
-            # Admission happens before the next forward/backward allocation.
+            # RAM/disk can recover by waiting. VRAM is different after the model
+            # is resident: waiting on our own persistent allocations can deadlock.
+            # Runtime VRAM is therefore measured after each optimizer step and
+            # handled by graceful backoff/restart instead of an infinite wait.
             _ram_gate("training", "Training model")
             _disk_gate(
                 "training",
                 "Training model",
                 required_bytes=policy.training_write_budget_bytes,
             )
-            _vram_gate(
-                "training",
-                "Training model",
-                required_free_bytes=policy.gpu_step_reserve_bytes,
-            )
             self._push(state)
 
         def on_step_end(self, args, state, control, **kwargs):
+            gc.collect()
+            torch.cuda.empty_cache()
+            gpu_state = current_gpu_memory(0)
+            if gpu_state is not None:
+                free_bytes = int(gpu_state["free_bytes"])
+                allocated = int(torch.cuda.memory_allocated(0))
+                reserved = int(torch.cuda.memory_reserved(0))
+                try:
+                    peak_allocated = int(torch.cuda.max_memory_allocated(0))
+                    peak_reserved = int(torch.cuda.max_memory_reserved(0))
+                except Exception:
+                    peak_allocated = allocated
+                    peak_reserved = reserved
+
+                if self.runtime_monitor is not None:
+                    self.runtime_monitor.update("system", {
+                        "gpu_free_gb": round(free_bytes / GIB, 2),
+                        "torch_allocated_gb": round(allocated / GIB, 2),
+                        "torch_reserved_gb": round(reserved / GIB, 2),
+                        "torch_peak_allocated_gb": round(peak_allocated / GIB, 2),
+                        "torch_peak_reserved_gb": round(peak_reserved / GIB, 2),
+                    })
+
+                if free_bytes < policy.gpu_step_reserve_bytes:
+                    runtime_backoff.update({
+                        "requested": True,
+                        "reason": "post-step VRAM headroom below safety reserve",
+                        "free_bytes": free_bytes,
+                        "step": int(getattr(state, "global_step", 0) or 0),
+                    })
+                    # Ask Trainer to save this completed step and stop cleanly.
+                    # The outer loop lowers batch footprint and resumes from the
+                    # checkpoint; no process is killed.
+                    control.should_save = True
+                    control.should_training_stop = True
+                    if self.runtime_monitor is not None:
+                        self.runtime_monitor.log(
+                            "WARNING",
+                            "VRAM headroom below safety reserve after optimizer step; "
+                            "saving checkpoint and lowering footprint before continuing.",
+                            free_gb=round(free_bytes / GIB, 2),
+                            reserve_gb=round(policy.gpu_step_reserve_bytes / GIB, 2),
+                            step=runtime_backoff["step"],
+                        )
+                try:
+                    torch.cuda.reset_peak_memory_stats(0)
+                except Exception:
+                    pass
             self._push(state)
 
         def on_log(self, args, state, control, logs=None, **kwargs):
@@ -633,7 +685,7 @@ def run_domain_training(
                     quantization_config=quant,
                     device_map="auto",
                     low_cpu_mem_usage=True,
-                    max_memory={0: "12GiB", "cpu": "12GiB"},
+                    max_memory={0: "9GiB", "cpu": "20GiB"},
                     dtype=torch.bfloat16,
                     trust_remote_code=cfg["trust_remote_code"],
                 )
@@ -772,11 +824,17 @@ def run_domain_training(
             )
 
         oom_level = 0
-        oom_pixel_budgets = [393_216, 262_144, 196_608, 131_072]
-        oom_text_lengths = [2048, 1536, 1024, 768]
-        oom_visual_chars = [4000, 3000, 2000, 1200]
+        oom_pixel_budgets = [196_608, 131_072, 98_304, 65_536]
+        oom_text_lengths = [1024, 768, 512, 384]
+        oom_visual_chars = [2000, 1500, 1000, 750]
 
         while True:
+            runtime_backoff.update({
+                "requested": False,
+                "reason": None,
+                "free_bytes": None,
+                "step": None,
+            })
             trainer = make_trainer()
             checkpoint = get_last_checkpoint(str(output_dir))
             if monitor is not None:
@@ -784,6 +842,48 @@ def run_domain_training(
                 monitor.update_phase("training", "Training model")
             try:
                 trainer.train(resume_from_checkpoint=checkpoint)
+                if runtime_backoff["requested"]:
+                    try:
+                        model.zero_grad(set_to_none=True)
+                    except Exception:
+                        pass
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
+                    next_level = min(
+                        oom_level + 1,
+                        len(oom_pixel_budgets) - 1,
+                    )
+                    changed = next_level != oom_level
+                    oom_level = next_level
+                    cfg["vision_max_pixels"] = oom_pixel_budgets[oom_level]
+                    cfg["text_max_length"] = oom_text_lengths[oom_level]
+                    cfg["visual_text_max_chars"] = oom_visual_chars[oom_level]
+                    _set_vision_budget(processor, cfg["vision_max_pixels"])
+
+                    if monitor is not None:
+                        monitor.update_phase(
+                            "vram_backoff",
+                            "Reducing training footprint after low VRAM headroom",
+                            status="paused",
+                        )
+                        monitor.log(
+                            "WARNING",
+                            "Graceful VRAM backoff requested after a completed step.",
+                            changed=changed,
+                            oom_level=oom_level,
+                            vision_max_pixels=cfg["vision_max_pixels"],
+                            text_max_length=cfg["text_max_length"],
+                            free_gb=(
+                                round(int(runtime_backoff["free_bytes"]) / GIB, 2)
+                                if runtime_backoff["free_bytes"] is not None
+                                else None
+                            ),
+                        )
+                    # The callback requested a checkpoint before stopping. Reuse it
+                    # immediately on the next loop with the smaller footprint.
+                    time.sleep(1.0)
+                    continue
                 break
             except torch.cuda.OutOfMemoryError:
                 try:
@@ -837,7 +937,7 @@ def run_domain_training(
                     "base_model_id": DEFAULT_BASE_MODEL_ID,
                     "base_model_path": str(model_path),
                     "dataset": dataset_meta,
-                    "preset": "rtx4080_16gb_qwen35_multimodal_v3_safe_kbit",
+                    "preset": "rtx4080_16gb_qwen35_multimodal_v4_vram_headroom",
                     "preset_values": cfg,
                     "smoke_test": max_steps is not None,
                     "streaming_dataset": True,
