@@ -19,3 +19,14 @@ jobs:
         run: pytest -q
       - name: Compile
         run: python -m compileall -q oracle_lite
+      - name: Dashboard JavaScript syntax
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          from oracle_lite.dashboard import DASHBOARD_HTML
+          match = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.S)
+          assert match, "dashboard script missing"
+          Path("/tmp/oracle-dashboard.js").write_text(match.group(1), encoding="utf-8")
+          PY
+          node --check /tmp/oracle-dashboard.js

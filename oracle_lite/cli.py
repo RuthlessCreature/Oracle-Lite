@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from pathlib import Path
 
 import typer
@@ -8,6 +10,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .config import load_config
+from .dashboard import MonitorLoggingHandler, TrainingDashboard, TrainingMonitor
 from .dataset import build_domain_dataset
 from .db import Registry
 from .ingest import ingest_corpus
@@ -168,13 +171,40 @@ def train(
     config: Path = typer.Option(Path("oracle.yaml")),
     max_steps: int | None = typer.Option(None, help="Optional smoke-test cap"),
 ):
-    """Auto-download Qwen3.5-9B-Base and run RTX-4080 multimodal QLoRA."""
-    run_id = run_domain_training(
-        load_config(config),
-        snapshot_id=snapshot_id,
-        max_steps=max_steps,
-    )
-    console.print(f"[green]Training completed[/green] run_id={run_id}")
+    """Manual snapshot training with the same auto-opened Web console."""
+    cfg = load_config(config)
+    monitor = TrainingMonitor(cfg.output_dir)
+    dashboard = TrainingDashboard(monitor)
+    log_handler = MonitorLoggingHandler(monitor)
+    log_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+    logging.getLogger().addHandler(log_handler)
+
+    url = dashboard.start()
+    console.print(f"[cyan]Oracle-Lite Training Console[/cyan] {url}")
+
+    try:
+        monitor.update("dataset", {"snapshot_id": snapshot_id})
+        run_id = run_domain_training(
+            cfg,
+            snapshot_id=snapshot_id,
+            max_steps=max_steps,
+            monitor=monitor,
+        )
+        monitor.finish(status="completed", label="Training completed")
+        final_state = monitor.save_final_state()
+        console.print(f"[green]Training completed[/green] run_id={run_id}")
+        console.print(f"[dim]Final console state:[/dim] {final_state}")
+        time.sleep(1.2)
+    except Exception as exc:
+        monitor.set_error(exc)
+        final_state = monitor.save_final_state()
+        console.print(f"[red]Failed[/red]: {exc}")
+        console.print(f"[dim]Final console state:[/dim] {final_state}")
+        time.sleep(1.2)
+        raise
+    finally:
+        logging.getLogger().removeHandler(log_handler)
+        dashboard.stop()
 
 
 @app.command()
@@ -189,22 +219,55 @@ def run(
         help="Force SHA-256 verification for every source file before training.",
     ),
 ):
-    """One command: scan -> ingest -> snapshot -> dataset -> download model -> train/resume."""
+    """One command with auto-opened local Web console and full telemetry."""
     cfg = load_config(config)
-    console.print("[cyan]Oracle-Lite[/cyan] checking corpus and training state...")
-    result = run_one_click(
-        cfg,
-        max_steps=max_steps,
-        verify_all=verify_all,
-    )
-    console.print_json(json.dumps(result.to_dict()))
-    if result.status == "up_to_date":
-        console.print("[green]Up to date[/green]: current corpus is already fully trained.")
-    else:
-        console.print(
-            f"[green]Done[/green]: status={result.status} "
-            f"snapshot={result.snapshot_id} run_id={result.run_id}"
+    monitor = TrainingMonitor(cfg.output_dir)
+    dashboard = TrainingDashboard(monitor)
+    log_handler = MonitorLoggingHandler(monitor)
+    log_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+    logging.getLogger().addHandler(log_handler)
+
+    url = dashboard.start()
+    console.print(f"[cyan]Oracle-Lite Training Console[/cyan] {url}")
+
+    try:
+        monitor.update_phase("bootstrap", "Starting one-click training")
+        result = run_one_click(
+            cfg,
+            max_steps=max_steps,
+            verify_all=verify_all,
+            monitor=monitor,
         )
+
+        if result.status == "up_to_date":
+            monitor.finish(status="completed", label="Current corpus is already up to date")
+        else:
+            monitor.finish(status="completed", label="Training completed")
+
+        final_state = monitor.save_final_state()
+        console.print_json(json.dumps(result.to_dict()))
+        console.print(f"[dim]Final console state:[/dim] {final_state}")
+        if result.status == "up_to_date":
+            console.print("[green]Up to date[/green]: current corpus is already fully trained.")
+        else:
+            console.print(
+                f"[green]Done[/green]: status={result.status} "
+                f"snapshot={result.snapshot_id} run_id={result.run_id}"
+            )
+
+        # Give the browser one final polling cycle so the completed state remains
+        # visible even after the local server shuts down with the CLI process.
+        time.sleep(1.2)
+    except Exception as exc:
+        monitor.set_error(exc)
+        final_state = monitor.save_final_state()
+        console.print(f"[red]Failed[/red]: {exc}")
+        console.print(f"[dim]Final console state:[/dim] {final_state}")
+        time.sleep(1.2)
+        raise
+    finally:
+        logging.getLogger().removeHandler(log_handler)
+        dashboard.stop()
 
 
 @app.command()

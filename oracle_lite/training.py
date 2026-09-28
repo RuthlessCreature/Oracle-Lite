@@ -125,6 +125,7 @@ def run_domain_training(
     *,
     snapshot_id: str,
     max_steps: int | None = None,
+    monitor=None,
 ) -> str:
     """Train Qwen3.5-9B-Base on mixed text + image/text domain records.
 
@@ -143,6 +144,7 @@ def run_domain_training(
             BitsAndBytesConfig,
             Trainer,
             TrainingArguments,
+            TrainerCallback,
         )
         from transformers.trainer_utils import get_last_checkpoint
     except ImportError as exc:
@@ -150,11 +152,87 @@ def run_domain_training(
             "Training dependencies are missing. Install with: pip install -e '.[train]'"
         ) from exc
 
+    class _MonitorCallback(TrainerCallback):
+        def __init__(self, runtime_monitor):
+            self.runtime_monitor = runtime_monitor
+            self.started = None
+
+        def _push(self, state, **extra):
+            if self.runtime_monitor is None:
+                return
+            if self.started is None:
+                self.started = __import__("time").monotonic()
+            total = int(getattr(state, "max_steps", 0) or 0)
+            step = int(getattr(state, "global_step", 0) or 0)
+            progress = (step / total * 100.0) if total > 0 else 0.0
+            elapsed = max(0.0, __import__("time").monotonic() - self.started)
+            eta = None
+            if step > 0 and total > step:
+                eta = elapsed / step * (total - step)
+            payload = {
+                "step": step,
+                "total_steps": total,
+                "progress_percent": round(progress, 2),
+                "epoch": getattr(state, "epoch", None),
+                "elapsed_seconds": int(elapsed),
+                "eta_seconds": int(eta) if eta is not None else None,
+            }
+            payload.update(extra)
+            self.runtime_monitor.update_training(**payload)
+
+        def on_train_begin(self, args, state, control, **kwargs):
+            self.started = __import__("time").monotonic()
+            if self.runtime_monitor is not None:
+                self.runtime_monitor.update_phase("training", "Training model")
+            self._push(state)
+
+        def on_step_end(self, args, state, control, **kwargs):
+            self._push(state)
+
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            logs = logs or {}
+            extra = {}
+            for source, target in (
+                ("loss", "loss"),
+                ("learning_rate", "learning_rate"),
+                ("grad_norm", "grad_norm"),
+                ("epoch", "epoch"),
+            ):
+                if source in logs:
+                    extra[target] = logs[source]
+            self._push(state, **extra)
+            if self.runtime_monitor is not None and logs:
+                compact = {k: v for k, v in logs.items() if isinstance(v, (int, float, str))}
+                self.runtime_monitor.log("INFO", "Trainer log", **compact)
+
+        def on_save(self, args, state, control, **kwargs):
+            checkpoint = str(Path(args.output_dir) / f"checkpoint-{state.global_step}")
+            self._push(state, checkpoint=checkpoint)
+            if self.runtime_monitor is not None:
+                self.runtime_monitor.log(
+                    "INFO",
+                    "Checkpoint saved",
+                    checkpoint=checkpoint,
+                    step=int(state.global_step),
+                )
+
+        def on_train_end(self, args, state, control, **kwargs):
+            self._push(state, progress_percent=100.0, eta_seconds=0)
+
     cfg = dict(RTX4080_16GB_MULTIMODAL_PRESET)
     if max_steps is not None:
         cfg["max_steps"] = int(max_steps)
 
+    if monitor is not None:
+        monitor.update("model", {"model_id": DEFAULT_BASE_MODEL_ID})
+        monitor.update_phase("model_download", "Checking / downloading Qwen3.5-9B-Base")
     model_path = ensure_base_model(app_cfg)
+    if monitor is not None:
+        monitor.update("model", {
+            "model_id": DEFAULT_BASE_MODEL_ID,
+            "local_path": str(model_path),
+        })
+        monitor.log("INFO", "Base model ready", path=str(model_path))
     dataset_dir = (app_cfg.datasets_dir / snapshot_id / "domain").resolve()
     dataset_meta_path = dataset_dir / "dataset.json"
     if not dataset_meta_path.exists():
@@ -173,6 +251,8 @@ def run_domain_training(
     ).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if monitor is not None:
+        monitor.update_phase("training_prepare", "Preparing training run")
     registry = Registry(app_cfg.registry_path)
     run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
     with registry.connect() as conn:
@@ -183,6 +263,8 @@ def run_domain_training(
         )
 
     try:
+        if monitor is not None:
+            monitor.update_training(run_id=run_id)
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA GPU not available. Local multimodal training requires NVIDIA CUDA.")
 
@@ -196,6 +278,8 @@ def run_domain_training(
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
+        if monitor is not None:
+            monitor.update_phase("model_load", "Loading processor and 4-bit multimodal model")
         processor = AutoProcessor.from_pretrained(
             str(model_path),
             trust_remote_code=cfg["trust_remote_code"],
@@ -235,6 +319,8 @@ def run_domain_training(
             if "visual" in lowered or "vision" in lowered:
                 parameter.requires_grad = False
 
+        if monitor is not None:
+            monitor.update_phase("dataset_load", "Loading training dataset")
         raw_ds = load_dataset("json", data_files=shard_paths, split="train")
         train_ds = raw_ds.filter(
             lambda row: bool((row.get("text") or "").strip()),
@@ -265,15 +351,29 @@ def run_domain_training(
             seed=cfg["seed"],
         )
 
+        callbacks = [_MonitorCallback(monitor)] if monitor is not None else None
         trainer = Trainer(
             model=model,
             args=args,
             train_dataset=train_ds,
             data_collator=MultimodalDomainCollator(processor, cfg),
+            callbacks=callbacks,
         )
 
         checkpoint = get_last_checkpoint(str(output_dir))
+        if monitor is not None:
+            monitor.update_training(
+                checkpoint=checkpoint,
+                run_id=run_id,
+            )
+            if checkpoint:
+                monitor.log("INFO", "Resuming from checkpoint", checkpoint=checkpoint)
+            else:
+                monitor.log("INFO", "Starting training from base model")
+            monitor.update_phase("training", "Training model")
         trainer.train(resume_from_checkpoint=checkpoint)
+        if monitor is not None:
+            monitor.update_phase("saving", "Saving final adapter and processor")
         trainer.save_model(str(output_dir / "adapter-final"))
         processor.save_pretrained(str(output_dir / "adapter-final"))
 
@@ -301,9 +401,14 @@ def run_domain_training(
                 "UPDATE training_runs SET status='completed',ended_at=? WHERE run_id=?",
                 (_now(), run_id),
             )
+        if monitor is not None:
+            monitor.update_training(progress_percent=100.0, eta_seconds=0, run_id=run_id)
+            monitor.log("INFO", "Training run completed", run_id=run_id)
         return run_id
 
-    except Exception:
+    except Exception as exc:
+        if monitor is not None:
+            monitor.set_error(exc)
         with registry.connect() as conn:
             conn.execute(
                 "UPDATE training_runs SET status='failed',ended_at=? WHERE run_id=?",

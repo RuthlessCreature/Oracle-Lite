@@ -2,7 +2,7 @@
 
 Local-first **multimodal** dataset factory and domain-model training pipeline.
 
-Oracle-Lite V0.3 is built around these fixed assumptions:
+Oracle-Lite V0.4 is built around these fixed assumptions:
 
 - corpus files live in one continuously changing local folder;
 - text, images, PDF pages, Word media and PowerPoint media are first-class source material;
@@ -147,6 +147,8 @@ Put source files into `corpus_dir`, then run exactly:
 oracle-lite run
 ```
 
+The command automatically starts a local Web Training Console and opens it in the default browser. It prefers `127.0.0.1:7860` and automatically falls back to another localhost port if 7860 is occupied. No dashboard setting is added to `oracle.yaml`.
+
 That single command performs:
 
 ```text
@@ -194,6 +196,27 @@ output_dir/models/Qwen3.5-9B-Base/
 
 If the model is absent when training starts, Oracle-Lite downloads it automatically.
 
+## Web Training Console
+
+The console starts before corpus scanning and remains active through model save.
+
+It displays:
+
+- pipeline stage: scan / ingest / snapshot / dataset / model download / model load / train / save;
+- global step, total steps, progress percentage, epoch, loss, learning rate, grad norm, elapsed time and ETA;
+- current checkpoint and resume status;
+- GPU utilization, temperature, power and VRAM used / total;
+- CPU utilization;
+- system RAM and Oracle-Lite process RSS;
+- disk used / free / total;
+- corpus counts: seen / new / changed / duplicates / tombstones / parse failures;
+- dataset counts: total / text / visual records;
+- live application and Trainer logs.
+
+The server binds to localhost only. Runtime logs are also persisted under `output_dir/logs/` as JSONL, together with a final JSON snapshot of the dashboard state.
+
+If NVML/GPU telemetry is unavailable, GPU monitoring degrades gracefully and training continues.
+
 ## Advanced/manual commands
 
 Normal use should be `oracle-lite run`.
@@ -209,7 +232,7 @@ oracle-lite train <snapshot_id>
 oracle-lite download-model
 ```
 
-V0.3 RTX 4080 policy:
+V0.4 RTX 4080 policy:
 
 - Qwen3.5-9B-Base;
 - 4-bit NF4;
@@ -252,7 +275,7 @@ output_dir/
 └── logs/
 ```
 
-## Known V0.3 limits
+## Known V0.4 limits
 
 - scanned PDF pages are visually preserved but OCR is not yet used as a deterministic label source;
 - PPTX embedded raster images are preserved, but the entire slide is not rendered into one screenshot;
