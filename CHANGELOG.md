@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.5 - 2026-09-28
+
+- Added an explicit RTX 4080 runtime VRAM headroom policy after a real first training step reached only ~31 MiB free VRAM.
+- Reduced default GPU model-placement budget from 12 GiB to 9 GiB, allowing more CPU offload on the 64 GiB host.
+- Reduced default visual pixel budget to 196,608 and text sequence limit to 1024 for the 16 GiB preset.
+- Removed the post-load per-step VRAM waiting gate that could deadlock on Oracle-Lite's own persistent model allocations.
+- After every optimizer step Oracle-Lite releases unused CUDA cache, records allocated/reserved/peak VRAM, and checks free VRAM.
+- If free VRAM is below the 2.5 GiB safety reserve, Trainer is asked to save a checkpoint and stop cleanly; Oracle-Lite lowers the visual/text footprint and resumes from that checkpoint.
+- Tightened the fallback ladder down to 65,536 visual pixels and 384 text tokens.
+- No process termination is used for VRAM pressure.
+
 ## 0.5.4 - 2026-09-28
 
 - Reworked multimodal collation for Qwen3.5-9B-Base so it no longer depends on a processor chat template.
