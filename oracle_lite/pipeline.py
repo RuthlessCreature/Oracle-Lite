@@ -132,9 +132,14 @@ def run_one_click(
         monitor.update("corpus", scan_stats.as_dict())
         monitor.log("INFO", "Corpus scan completed", **scan_stats.as_dict())
 
+    ingest_progress = None
     if monitor is not None:
         monitor.update_phase("ingest", "Parsing multimodal corpus")
-    ingest_stats = ingest_corpus(cfg)
+
+        def ingest_progress(payload: dict[str, Any]) -> None:
+            monitor.update("corpus", payload)
+
+    ingest_stats = ingest_corpus(cfg, progress=ingest_progress)
     if monitor is not None:
         corpus_state = scan_stats.as_dict()
         corpus_state.update({
