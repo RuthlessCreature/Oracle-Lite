@@ -25,12 +25,12 @@ class MemoryPolicy:
     @classmethod
     def auto(cls) -> "MemoryPolicy":
         total = int(psutil.virtual_memory().total)
-        reserve = int(max(8 * GIB, total * 0.20))
+        reserve = int(max(12 * GIB, total * 0.25))
         # Keep one parser worker bounded so a pathological source file cannot
-        # consume the workstation. On a ~64 GiB host this yields ~10 GiB RSS and
-        # 12 GiB address-space hard cap.
-        worker_rss = int(min(10 * GIB, max(4 * GIB, total * 0.18)))
-        worker_as = int(min(12 * GIB, max(5 * GIB, total * 0.22)))
+        # consume the workstation. On a ~64 GiB host this yields ~8 GiB RSS and
+        # 10 GiB address-space hard cap, while ~16 GiB remains reserved for OS/UI.
+        worker_rss = int(min(8 * GIB, max(4 * GIB, total * 0.14)))
+        worker_as = int(min(10 * GIB, max(5 * GIB, total * 0.18)))
         return cls(
             total_bytes=total,
             reserve_system_bytes=reserve,
