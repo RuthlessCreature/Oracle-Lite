@@ -133,11 +133,10 @@ def _stream_office_source(source: Path, asset_dir: Path, sidecar_tmp: Path) -> t
                         chunk.append(text)
                         chars += len(text) + 1
                         if chars >= STREAM_CHARS:
-                            images = copied_images if segments == 0 else []
                             if _append_segment(
                                 out,
                                 text="\n".join(chunk),
-                                images=images,
+                                images=[],
                                 metadata={
                                     "kind": "office_low_memory",
                                     "xml_index": xml_index,
@@ -149,11 +148,10 @@ def _stream_office_source(source: Path, asset_dir: Path, sidecar_tmp: Path) -> t
                             chars = 0
                             chunk_index += 1
                     if chunk:
-                        images = copied_images if segments == 0 else []
                         if _append_segment(
                             out,
                             text="\n".join(chunk),
-                            images=images,
+                            images=[],
                             metadata={
                                 "kind": "office_low_memory",
                                 "xml_index": xml_index,
@@ -162,12 +160,18 @@ def _stream_office_source(source: Path, asset_dir: Path, sidecar_tmp: Path) -> t
                         ):
                             segments += 1
 
-            if segments == 0 and copied_images:
+            # Preserve raster assets as independent unlabeled visual segments.
+            # They remain available for future OCR/RAG but are filtered from
+            # supervised training because text is intentionally empty.
+            for image_index, image_path in enumerate(copied_images):
                 if _append_segment(
                     out,
                     text="",
-                    images=copied_images,
-                    metadata={"kind": "office_low_memory_unlabeled_images"},
+                    images=[image_path],
+                    metadata={
+                        "kind": "office_low_memory_unlabeled_image",
+                        "image_index": image_index,
+                    },
                 ):
                     segments += 1
 
