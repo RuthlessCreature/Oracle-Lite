@@ -11,6 +11,9 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 from .base import ParsedDocument, ParsedSegment
 
 
+RASTER_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+
+
 def _safe_suffix(name: str, fallback: str = ".png") -> str:
     suffix = Path(name).suffix.lower()
     return suffix if suffix else fallback
@@ -20,9 +23,18 @@ def _extract_zip_media(path: Path, asset_dir: Path, prefix: str) -> list[str]:
     asset_dir.mkdir(parents=True, exist_ok=True)
     assets: list[str] = []
     with zipfile.ZipFile(path) as zf:
-        names = sorted(name for name in zf.namelist() if name.startswith(prefix) and not name.endswith("/"))
-        for idx, name in enumerate(names, start=1):
-            target = asset_dir / f"media-{idx:04d}{_safe_suffix(name)}"
+        names = sorted(
+            name
+            for name in zf.namelist()
+            if name.startswith(prefix) and not name.endswith("/")
+        )
+        kept = 0
+        for name in names:
+            suffix = _safe_suffix(name)
+            if suffix not in RASTER_EXTENSIONS:
+                continue
+            kept += 1
+            target = asset_dir / f"media-{kept:04d}{suffix}"
             target.write_bytes(zf.read(name))
             assets.append(str(target.resolve()))
     return assets
@@ -50,7 +62,10 @@ def parse_docx(path: Path, asset_dir: Path) -> ParsedDocument:
             blocks.append(text)
 
     for table in doc.tables:
-        rows = [[cell.text.strip().replace("\n", " ") for cell in row.cells] for row in table.rows]
+        rows = [
+            [cell.text.strip().replace("\n", " ") for cell in row.cells]
+            for row in table.rows
+        ]
         if not rows:
             continue
         width = max(len(r) for r in rows)
@@ -83,28 +98,30 @@ def parse_pdf(path: Path, asset_dir: Path) -> ParsedDocument:
     pages: list[str] = []
     empty_pages = 0
 
-    for idx, page in enumerate(doc, start=1):
-        text = page.get_text("text").strip()
-        if not text:
-            empty_pages += 1
+    try:
+        for idx, page in enumerate(doc, start=1):
+            text = page.get_text("text").strip()
+            if not text:
+                empty_pages += 1
 
-        # Preserve the actual page as a visual asset. 1.5x is a compromise for
-        # RTX 4080 training: enough detail for diagrams/tables without exploding VRAM.
-        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
-        image_path = asset_dir / f"page-{idx:04d}.png"
-        pix.save(str(image_path))
+            # Preserve the actual page as the visual truth. 1.5x keeps diagrams
+            # and tables legible while avoiding absurd raster sizes on a 4080.
+            pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+            image_path = asset_dir / f"page-{idx:04d}.png"
+            pix.save(str(image_path))
 
-        page_text = f"## Page {idx}\n\n{text}" if text else f"## Page {idx}"
-        pages.append(page_text)
-        segments.append(
-            ParsedSegment(
-                text=text,
-                images=[str(image_path.resolve())],
-                metadata={"kind": "pdf_page", "page": idx},
+            page_text = f"## Page {idx}\n\n{text}" if text else f"## Page {idx}"
+            pages.append(page_text)
+            segments.append(
+                ParsedSegment(
+                    text=text,
+                    images=[str(image_path.resolve())],
+                    metadata={"kind": "pdf_page", "page": idx},
+                )
             )
-        )
+    finally:
+        doc.close()
 
-    doc.close()
     return ParsedDocument(
         title=path.stem,
         text="\n\n".join(pages),
@@ -144,7 +161,10 @@ def parse_pptx(path: Path, asset_dir: Path) -> ParsedDocument:
                     items.append((top, left, text))
 
             if getattr(shape, "has_table", False):
-                rows = [[cell.text.strip().replace("\n", " ") for cell in row.cells] for row in shape.table.rows]
+                rows = [
+                    [cell.text.strip().replace("\n", " ") for cell in row.cells]
+                    for row in shape.table.rows
+                ]
                 if rows:
                     width = max(len(r) for r in rows)
                     rows = [r + [""] * (width - len(r)) for r in rows]
@@ -158,10 +178,14 @@ def parse_pptx(path: Path, asset_dir: Path) -> ParsedDocument:
 
             if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
                 ext = _safe_suffix(shape.image.filename, ".png")
-                target = asset_dir / f"slide-{slide_idx:04d}-image-{shape_idx:03d}{ext}"
-                target.write_bytes(shape.image.blob)
-                slide_images.append(str(target.resolve()))
-                image_count += 1
+                if ext in RASTER_EXTENSIONS:
+                    target = (
+                        asset_dir
+                        / f"slide-{slide_idx:04d}-image-{shape_idx:03d}{ext}"
+                    )
+                    target.write_bytes(shape.image.blob)
+                    slide_images.append(str(target.resolve()))
+                    image_count += 1
 
         items.sort(key=lambda x: (x[0], x[1]))
         body = "\n\n".join(text for _, _, text in items)
