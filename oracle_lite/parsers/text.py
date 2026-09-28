@@ -5,23 +5,46 @@ from pathlib import Path
 from .base import ParsedDocument, ParsedSegment
 
 
-def _read_text(path: Path) -> str:
-    for encoding in ("utf-8", "utf-8-sig", "gb18030", "latin-1"):
+CHUNK_CHARS = 256_000
+ENCODINGS = ("utf-8", "utf-8-sig", "gb18030", "latin-1")
+
+
+def _detect_encoding(path: Path) -> str:
+    sample = path.read_bytes()[:1024 * 1024]
+    for encoding in ENCODINGS:
         try:
-            return path.read_text(encoding=encoding)
+            sample.decode(encoding)
+            return encoding
         except UnicodeDecodeError:
             continue
-    raise UnicodeDecodeError("unknown", b"", 0, 1, f"Unable to decode {path}")
+    return "latin-1"
 
 
 def parse_text_like(path: Path) -> ParsedDocument:
-    text = _read_text(path)
+    encoding = _detect_encoding(path)
+    segments: list[ParsedSegment] = []
+    with path.open("r", encoding=encoding) as f:
+        index = 0
+        while True:
+            chunk = f.read(CHUNK_CHARS)
+            if not chunk:
+                break
+            segments.append(
+                ParsedSegment(
+                    text=chunk,
+                    metadata={"chunk_index": index},
+                )
+            )
+            index += 1
+
     return ParsedDocument(
         title=path.stem,
-        text=text,
-        segments=[ParsedSegment(text=text)],
+        text="",
+        segments=segments,
         metadata={
             "extension": path.suffix.lower(),
             "bytes": path.stat().st_size,
+            "encoding": encoding,
+            "chunks": len(segments),
         },
     )
