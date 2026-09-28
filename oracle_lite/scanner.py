@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable
 
 from .config import AppConfig
 from .db import Registry
 from .hashutil import hash_file
+
+
+ScanProgress = Callable[[dict[str, Any]], None]
 
 
 @dataclass(slots=True)
@@ -17,6 +21,7 @@ class ScanStats:
     duplicates: int = 0
     tombstoned: int = 0
     hashed: int = 0
+    bytes_hashed: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -27,6 +32,7 @@ class ScanStats:
             "duplicates": self.duplicates,
             "tombstoned": self.tombstoned,
             "hashed": self.hashed,
+            "bytes_hashed": self.bytes_hashed,
         }
 
 
@@ -43,13 +49,26 @@ def _iter_files(root: Path, cfg: AppConfig):
         yield path
 
 
-def scan_corpus(cfg: AppConfig, *, verify_all: bool = False) -> ScanStats:
+def scan_corpus(
+    cfg: AppConfig,
+    *,
+    verify_all: bool = False,
+    progress: ScanProgress | None = None,
+) -> ScanStats:
     registry = Registry(cfg.registry_path)
     stats = ScanStats()
+
+    def emit(**extra: Any) -> None:
+        if progress is None:
+            return
+        payload: dict[str, Any] = stats.as_dict()
+        payload.update(extra)
+        progress(payload)
 
     for root in cfg.corpus_roots:
         root = root.expanduser().resolve()
         seen: set[str] = set()
+        emit(current_root=str(root), current_file=None, hashing=False)
 
         for path in _iter_files(root, cfg) or []:
             resolved = str(path.resolve())
@@ -58,8 +77,14 @@ def scan_corpus(cfg: AppConfig, *, verify_all: bool = False) -> ScanStats:
             st = path.stat()
             previous = registry.get_source(path)
 
-            # Fast path: unchanged stat metadata reuses the prior content hash.
-            # Use --verify-all to SHA-256 every file when strict verification is desired.
+            emit(
+                current_root=str(root),
+                current_file=resolved,
+                current_file_size=st.st_size,
+                current_file_hashed_bytes=0,
+                hashing=False,
+            )
+
             if (
                 previous is not None
                 and not verify_all
@@ -69,8 +94,22 @@ def scan_corpus(cfg: AppConfig, *, verify_all: bool = False) -> ScanStats:
             ):
                 content_hash = previous["content_hash"]
             else:
-                content_hash = hash_file(path, cfg.hash_algorithm)
+                def on_hash(processed: int, total: int) -> None:
+                    emit(
+                        current_root=str(root),
+                        current_file=resolved,
+                        current_file_size=total,
+                        current_file_hashed_bytes=processed,
+                        hashing=True,
+                    )
+
+                content_hash = hash_file(
+                    path,
+                    cfg.hash_algorithm,
+                    progress=on_hash,
+                )
                 stats.hashed += 1
+                stats.bytes_hashed += st.st_size
 
             other_paths = registry.active_paths_for_hash(content_hash)
             state = registry.upsert_source(
@@ -91,6 +130,15 @@ def scan_corpus(cfg: AppConfig, *, verify_all: bool = False) -> ScanStats:
             else:
                 stats.unchanged += 1
 
+            emit(
+                current_root=str(root),
+                current_file=resolved,
+                current_file_size=st.st_size,
+                current_file_hashed_bytes=st.st_size if state != "unchanged" else 0,
+                hashing=False,
+            )
+
         stats.tombstoned += registry.mark_missing_under_root(root, seen)
 
+    emit(current_file=None, hashing=False, complete=True)
     return stats
