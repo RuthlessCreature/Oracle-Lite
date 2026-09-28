@@ -53,7 +53,9 @@ def test_dashboard_serves_html_and_state_api(tmp_path: Path):
         assert "Parser memory" in html
         assert "Process tree RSS" in html
         assert "RAM reserve / resume" in html
-        assert "Disk reserve / target" in html\n        assert "GPU free / required" in html\n        assert "Swap used" in html
+        assert "Disk reserve / target" in html
+        assert "GPU free / required" in html
+        assert "Swap used" in html
         assert "Parser RSS budget / AS cap" in html
     finally:
         dashboard.stop()
