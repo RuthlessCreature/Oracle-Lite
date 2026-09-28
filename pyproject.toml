@@ -34,6 +34,7 @@ train = [
 ]
 dev = [
   "pytest>=8.0",
+  "pytest-timeout>=2.3",
   "ruff>=0.7",
 ]
 
@@ -45,3 +46,5 @@ include = ["oracle_lite*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+timeout = 45
+timeout_method = "thread"
