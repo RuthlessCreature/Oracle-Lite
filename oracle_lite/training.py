@@ -172,6 +172,23 @@ def _build_training_arguments(
     return TrainingArguments(**supported), dropped
 
 
+def _base_multimodal_prompt(processor) -> str:
+    """Build the raw multimodal prefix used by Qwen VL base models.
+
+    Base checkpoints do not require a chat template. Qwen's processor expands
+    the image placeholder when processor(text=..., images=...) is called.
+    """
+    vision_start = getattr(processor, "vision_start_token", "<|vision_start|>")
+    image_token = getattr(processor, "image_token", "<|image_pad|>")
+    vision_end = getattr(processor, "vision_end_token", "<|vision_end|>")
+    return (
+        f"{vision_start}{image_token}{vision_end}\n"
+        "Continue from this source image using only information grounded in the "
+        "visible document, table, diagram, drawing, or layout. Do not add "
+        "external facts.\nSOURCE_GROUNDED_TEXT:\n"
+    )
+
+
 class MultimodalDomainCollator:
     """Batch-size-1 collator mixing text CLM and grounded VLM supervision."""
 
@@ -208,40 +225,37 @@ class MultimodalDomainCollator:
 
         # Dataset construction enforces one image per multimodal record.
         image_path = str(Path(item["images"][0]).resolve())
-        user_content = [
-            {"type": "image", "path": image_path},
-            {
-                "type": "text",
-                "text": (
-                    "读取这些原始资料图像，理解其中可见的文字、表格、图示与版面结构。"
-                    "仅依据图像本身，不补充外部事实。"
-                ),
-            },
-        ]
+        prompt_text = _base_multimodal_prompt(self.processor)
+        full_text = prompt_text + target_text
 
-        prompt_messages = [{"role": "user", "content": user_content}]
-        full_messages = [
-            *prompt_messages,
-            {"role": "assistant", "content": [{"type": "text", "text": target_text}]},
-        ]
+        # Qwen3.5-9B-Base can ship without a processor chat_template. Use the
+        # base-native raw VL placeholder path instead of apply_chat_template().
+        from PIL import Image
 
-        prompt_batch = self.processor.apply_chat_template(
-            prompt_messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt",
-        )
-        batch = self.processor.apply_chat_template(
-            full_messages,
-            tokenize=True,
-            add_generation_prompt=False,
-            return_dict=True,
-            return_tensors="pt",
-        )
+        with Image.open(image_path) as source_image:
+            image = source_image.convert("RGB")
+
+            # Compute the exact masked prefix length using the same visual input,
+            # then release that temporary batch before constructing the training
+            # batch so CPU memory does not hold two sets of pixel tensors.
+            prompt_batch = self.processor(
+                text=[prompt_text],
+                images=[image],
+                padding=False,
+                return_tensors="pt",
+            )
+            prompt_len = int(prompt_batch["input_ids"].shape[1])
+            del prompt_batch
+
+            batch = self.processor(
+                text=[full_text],
+                images=[image],
+                padding=False,
+                return_tensors="pt",
+            )
 
         labels = batch["input_ids"].clone()
-        prompt_len = min(prompt_batch["input_ids"].shape[1], labels.shape[1])
+        prompt_len = min(prompt_len, labels.shape[1])
         labels[:, :prompt_len] = -100
         pad_id = self.processor.tokenizer.pad_token_id
         if pad_id is not None:
