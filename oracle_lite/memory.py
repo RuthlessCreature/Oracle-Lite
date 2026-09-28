@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import os
-import signal
+import gc
 import sys
 import threading
 import time
@@ -20,6 +19,7 @@ MIB = 1024 ** 2
 class MemoryPolicy:
     total_bytes: int
     reserve_system_bytes: int
+    resume_system_bytes: int
     max_worker_rss_bytes: int
     max_worker_address_space_bytes: int
     max_swap_growth_bytes: int
@@ -28,14 +28,16 @@ class MemoryPolicy:
     def auto(cls) -> "MemoryPolicy":
         total = int(psutil.virtual_memory().total)
         reserve = int(max(12 * GIB, total * 0.25))
-        # Keep one parser worker bounded so a pathological source file cannot
-        # consume the workstation. On a ~64 GiB host this yields ~8 GiB RSS and
-        # 10 GiB address-space hard cap, while ~16 GiB remains reserved for OS/UI.
+        resume = int(min(total * 0.55, reserve + max(3 * GIB, total * 0.06)))
+
+        # Conservative defaults for a workstation. On a ~64 GiB host:
+        # reserve ~16 GiB for OS/UI, parser RSS cap ~8 GiB, AS cap ~12 GiB.
         worker_rss = int(min(8 * GIB, max(4 * GIB, total * 0.14)))
-        worker_as = int(min(10 * GIB, max(5 * GIB, total * 0.18)))
+        worker_as = int(min(12 * GIB, max(6 * GIB, total * 0.20)))
         return cls(
             total_bytes=total,
             reserve_system_bytes=reserve,
+            resume_system_bytes=max(resume, reserve),
             max_worker_rss_bytes=worker_rss,
             max_worker_address_space_bytes=worker_as,
             max_swap_growth_bytes=512 * MIB,
@@ -45,10 +47,12 @@ class MemoryPolicy:
         return {
             "total_bytes": self.total_bytes,
             "reserve_system_bytes": self.reserve_system_bytes,
+            "resume_system_bytes": self.resume_system_bytes,
             "max_worker_rss_bytes": self.max_worker_rss_bytes,
             "max_worker_address_space_bytes": self.max_worker_address_space_bytes,
             "max_swap_growth_bytes": self.max_swap_growth_bytes,
             "reserve_system_gb": round(self.reserve_system_bytes / GIB, 2),
+            "resume_system_gb": round(self.resume_system_bytes / GIB, 2),
             "max_worker_rss_gb": round(self.max_worker_rss_bytes / GIB, 2),
             "max_worker_address_space_gb": round(
                 self.max_worker_address_space_bytes / GIB, 2
@@ -64,7 +68,7 @@ def apply_linux_address_space_limit(limit_bytes: int) -> bool:
     try:
         import resource
 
-        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+        _, hard = resource.getrlimit(resource.RLIMIT_AS)
         target = int(limit_bytes)
         if hard != resource.RLIM_INFINITY:
             target = min(target, int(hard))
@@ -88,15 +92,55 @@ def process_tree_rss(pid: int) -> int:
         return 0
 
 
+def wait_for_safe_memory(
+    policy: MemoryPolicy,
+    *,
+    on_wait: Callable[[dict], None] | None = None,
+    poll_seconds: float = 1.0,
+    stable_samples: int = 3,
+) -> None:
+    """Pause the pipeline until RAM is safely above the resume threshold.
+
+    Memory pressure is backpressure, not failure. Hysteresis prevents rapid
+    pause/resume oscillation around one threshold.
+    """
+    stable = 0
+    while stable < stable_samples:
+        gc.collect()
+        vm = psutil.virtual_memory()
+        available = int(vm.available)
+        safe = available >= policy.resume_system_bytes
+
+        if on_wait is not None:
+            on_wait({
+                "available_bytes": available,
+                "available_gb": round(available / GIB, 2),
+                "reserve_gb": round(policy.reserve_system_bytes / GIB, 2),
+                "resume_gb": round(policy.resume_system_bytes / GIB, 2),
+                "safe": safe,
+            })
+
+        if safe:
+            stable += 1
+        else:
+            stable = 0
+        if stable < stable_samples:
+            time.sleep(poll_seconds)
+
+
 class HostMemoryWatchdog:
-    """Fail-fast host guard: protecting the OS is more important than a run."""
+    """Non-destructive pressure observer.
+
+    This class no longer terminates Oracle-Lite. The actual pipeline uses
+    wait_for_safe_memory() and worker restarts to apply backpressure.
+    """
 
     def __init__(
         self,
         *,
         reserve_bytes: int,
         log_dir: str | Path,
-        interval_seconds: float = 0.25,
+        interval_seconds: float = 0.5,
         on_warning: Callable[[str], None] | None = None,
         max_swap_growth_bytes: int = 512 * MIB,
     ):
@@ -108,11 +152,11 @@ class HostMemoryWatchdog:
         self._swap_baseline = int(psutil.swap_memory().used)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._in_pressure = False
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        self.log_dir.mkdir(parents=True, exist_ok=True)
         self._thread = threading.Thread(
             target=self._run,
             name="oracle-lite-host-memory-watchdog",
@@ -130,48 +174,14 @@ class HostMemoryWatchdog:
             available = int(psutil.virtual_memory().available)
             swap_used = int(psutil.swap_memory().used)
             swap_growth = max(0, swap_used - self._swap_baseline)
-
-            ram_critical = available < self.reserve_bytes
-            swap_critical = swap_growth > self.max_swap_growth_bytes
-            if not ram_critical and not swap_critical:
-                continue
-
-            if ram_critical:
-                reason = (
-                    "available host RAM "
-                    f"{available / GIB:.2f} GiB fell below reserved "
-                    f"{self.reserve_bytes / GIB:.2f} GiB"
-                )
-            else:
-                reason = (
-                    "swap grew by "
-                    f"{swap_growth / GIB:.2f} GiB above startup baseline "
-                    f"(limit {self.max_swap_growth_bytes / GIB:.2f} GiB)"
-                )
-
-            message = (
-                "EMERGENCY MEMORY STOP: "
-                + reason
-                + ". Oracle-Lite is terminating immediately to protect the OS."
+            pressure = (
+                available < self.reserve_bytes
+                or swap_growth > self.max_swap_growth_bytes
             )
-            try:
-                marker = self.log_dir / "memory-emergency.log"
-                with marker.open("a", encoding="utf-8") as f:
-                    f.write(f"{time.time():.3f} {message}\n")
-                    f.flush()
-                    os.fsync(f.fileno())
-            except Exception:
-                pass
 
-            if self.on_warning is not None:
-                try:
-                    self.on_warning(message)
-                except Exception:
-                    pass
-
-            # Immediate termination is intentional. Waiting for normal unwinding
-            # under memory pressure risks swapping the whole workstation.
-            try:
-                os.kill(os.getpid(), signal.SIGTERM)
-            finally:
-                os._exit(75)
+            if pressure and not self._in_pressure and self.on_warning is not None:
+                self.on_warning(
+                    "MEMORY PRESSURE: Oracle-Lite will pause/restart the current "
+                    "memory-heavy stage instead of exhausting host RAM."
+                )
+            self._in_pressure = pressure
