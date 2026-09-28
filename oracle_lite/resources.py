@@ -48,10 +48,14 @@ class HostResourcePolicy:
                 min(ram_total * 0.30, max(int(1.5 * GIB), ram_total * 0.20))
             )
             parser_as = int(
-                min(3 * GIB, max(1 * GIB, ram_total * 0.10), ram_total * 0.18)
+                min(
+                    3 * GIB,
+                    max(2 * GIB, ram_total * 0.18),
+                    ram_total * 0.35,
+                )
             )
             parser_rss = int(
-                min(int(2.5 * GIB), max(int(0.75 * GIB), ram_total * 0.08))
+                min(int(2.5 * GIB), max(1 * GIB, ram_total * 0.12))
             )
 
         ram_resume = int(
