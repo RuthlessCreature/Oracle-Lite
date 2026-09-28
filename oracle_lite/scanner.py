@@ -176,7 +176,10 @@ def scan_corpus(
                     stats.hashed += 1
                     stats.bytes_hashed += st.st_size
 
-                other_paths = registry.active_paths_for_hash(content_hash)
+                has_duplicate = registry.has_other_active_path_for_hash(
+                    content_hash,
+                    resolved,
+                )
                 state = registry.upsert_source(
                     root=root,
                     path=path,
@@ -185,7 +188,7 @@ def scan_corpus(
                     content_hash=content_hash,
                 )
 
-                if any(p != resolved for p in other_paths):
+                if has_duplicate:
                     stats.duplicates += 1
 
                 if state == "new":
