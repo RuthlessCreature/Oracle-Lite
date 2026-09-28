@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import AppConfig
 from .db import Registry
 from .models import DEFAULT_BASE_MODEL_ID, ensure_base_model
+from .memory import GIB, MemoryPolicy, wait_for_safe_memory
 
 
 RTX4080_16GB_MULTIMODAL_PRESET = {
@@ -152,6 +153,44 @@ def run_domain_training(
             "Training dependencies are missing. Install with: pip install -e '.[train]'"
         ) from exc
 
+    memory_policy = MemoryPolicy.auto()
+
+    def _memory_gate(resume_phase: str, resume_label: str) -> None:
+        import psutil
+
+        if int(psutil.virtual_memory().available) >= memory_policy.reserve_system_bytes:
+            return
+
+        if monitor is not None:
+            monitor.update_phase(
+                "waiting_for_memory",
+                "Waiting for memory to recover",
+                status="paused",
+            )
+            monitor.log(
+                "WARNING",
+                "Host RAM pressure detected; pausing at a safe training boundary.",
+            )
+
+        def on_wait(state: dict) -> None:
+            if monitor is not None:
+                monitor.update("system", {
+                    "ram_available_gb": state["available_gb"],
+                    "memory_reserve_gb": state["reserve_gb"],
+                    "memory_resume_gb": state["resume_gb"],
+                })
+
+        wait_for_safe_memory(
+            memory_policy,
+            on_wait=on_wait,
+            poll_seconds=1.0,
+            stable_samples=3,
+        )
+
+        if monitor is not None:
+            monitor.update_phase(resume_phase, resume_label, status="running")
+            monitor.log("INFO", "Host RAM recovered; resuming.")
+
     class _MonitorCallback(TrainerCallback):
         def __init__(self, runtime_monitor):
             self.runtime_monitor = runtime_monitor
@@ -188,6 +227,7 @@ def run_domain_training(
 
         def on_step_end(self, args, state, control, **kwargs):
             self._push(state)
+            _memory_gate("training", "Training model")
 
         def on_log(self, args, state, control, logs=None, **kwargs):
             logs = logs or {}
@@ -224,6 +264,10 @@ def run_domain_training(
         cfg["max_steps"] = int(max_steps)
 
     if monitor is not None:
+        monitor.update("system", {
+            "memory_reserve_gb": round(memory_policy.reserve_system_bytes / GIB, 2),
+            "memory_resume_gb": round(memory_policy.resume_system_bytes / GIB, 2),
+        })
         monitor.update("model", {"model_id": DEFAULT_BASE_MODEL_ID})
         monitor.update_phase("model_download", "Checking / downloading Qwen3.5-9B-Base")
     model_path = ensure_base_model(app_cfg)
@@ -278,6 +322,7 @@ def run_domain_training(
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
+        _memory_gate("model_load", "Loading processor and 4-bit multimodal model")
         if monitor is not None:
             monitor.update_phase("model_load", "Loading processor and 4-bit multimodal model")
         processor = AutoProcessor.from_pretrained(
@@ -291,6 +336,8 @@ def run_domain_training(
             str(model_path),
             quantization_config=quant,
             device_map="auto",
+            low_cpu_mem_usage=True,
+            max_memory={0: "15GiB", "cpu": "8GiB"},
             torch_dtype=torch.bfloat16,
             trust_remote_code=cfg["trust_remote_code"],
         )
@@ -319,6 +366,7 @@ def run_domain_training(
             if "visual" in lowered or "vision" in lowered:
                 parameter.requires_grad = False
 
+        _memory_gate("dataset_load", "Loading training dataset")
         if monitor is not None:
             monitor.update_phase("dataset_load", "Loading training dataset")
         raw_ds = load_dataset("json", data_files=shard_paths, split="train")
