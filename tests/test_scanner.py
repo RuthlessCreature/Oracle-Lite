@@ -92,3 +92,18 @@ def test_scan_progress_reports_current_file_and_hash_bytes(tmp_path: Path):
     assert hash_events[-1]["current_file_hashed_bytes"] == len(payload)
     assert hash_events[-1]["current_file_size"] == len(payload)
     assert events[-1].get("complete") is True
+
+
+def test_unchanged_file_reuses_hash_without_rehashing(tmp_path: Path):
+    cfg = make_cfg(tmp_path)
+    source = cfg.corpus_dir / "cached.txt"
+    source.write_text("stable payload", encoding="utf-8")
+
+    first = scan_corpus(cfg)
+    assert first.hashed == 1
+
+    second = scan_corpus(cfg)
+    assert second.files_seen == 1
+    assert second.unchanged == 1
+    assert second.hashed == 0
+    assert second.bytes_hashed == 0
