@@ -108,7 +108,7 @@ def ingest_corpus(
 
     emit(stage="ingest_start")
 
-    for row in registry.list_active_unique_content():
+    for row in registry.iter_active_unique_content():
         content_hash = row["content_hash"]
         source_path = Path(row["source_path"])
         existing = registry.get_artifact(content_hash, cfg.parser_version)
