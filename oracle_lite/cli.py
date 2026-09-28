@@ -204,6 +204,8 @@ def train(
         "parser_worker_rss_cap_gb": round(memory_policy.max_worker_rss_bytes / (1024 ** 3), 2),
         "parser_worker_as_cap_gb": round(memory_policy.max_worker_address_space_bytes / (1024 ** 3), 2),
         "max_swap_growth_gb": round(memory_policy.max_swap_growth_bytes / (1024 ** 3), 2),
+        "cgroup_memory_max_gb": round(memory_policy.cgroup_memory_max_bytes / (1024 ** 3), 2),
+        "cgroup_swap_max_gb": round(memory_policy.cgroup_swap_max_bytes / (1024 ** 3), 2),
     })
 
     try:
@@ -267,6 +269,8 @@ def run(
         "parser_worker_rss_cap_gb": round(memory_policy.max_worker_rss_bytes / (1024 ** 3), 2),
         "parser_worker_as_cap_gb": round(memory_policy.max_worker_address_space_bytes / (1024 ** 3), 2),
         "max_swap_growth_gb": round(memory_policy.max_swap_growth_bytes / (1024 ** 3), 2),
+        "cgroup_memory_max_gb": round(memory_policy.cgroup_memory_max_bytes / (1024 ** 3), 2),
+        "cgroup_swap_max_gb": round(memory_policy.cgroup_swap_max_bytes / (1024 ** 3), 2),
     })
 
     try:
