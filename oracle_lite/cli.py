@@ -171,13 +171,40 @@ def train(
     config: Path = typer.Option(Path("oracle.yaml")),
     max_steps: int | None = typer.Option(None, help="Optional smoke-test cap"),
 ):
-    """Auto-download Qwen3.5-9B-Base and run RTX-4080 multimodal QLoRA."""
-    run_id = run_domain_training(
-        load_config(config),
-        snapshot_id=snapshot_id,
-        max_steps=max_steps,
-    )
-    console.print(f"[green]Training completed[/green] run_id={run_id}")
+    """Manual snapshot training with the same auto-opened Web console."""
+    cfg = load_config(config)
+    monitor = TrainingMonitor(cfg.output_dir)
+    dashboard = TrainingDashboard(monitor)
+    log_handler = MonitorLoggingHandler(monitor)
+    log_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+    logging.getLogger().addHandler(log_handler)
+
+    url = dashboard.start()
+    console.print(f"[cyan]Oracle-Lite Training Console[/cyan] {url}")
+
+    try:
+        monitor.update("dataset", {"snapshot_id": snapshot_id})
+        run_id = run_domain_training(
+            cfg,
+            snapshot_id=snapshot_id,
+            max_steps=max_steps,
+            monitor=monitor,
+        )
+        monitor.finish(status="completed", label="Training completed")
+        final_state = monitor.save_final_state()
+        console.print(f"[green]Training completed[/green] run_id={run_id}")
+        console.print(f"[dim]Final console state:[/dim] {final_state}")
+        time.sleep(1.2)
+    except Exception as exc:
+        monitor.set_error(exc)
+        final_state = monitor.save_final_state()
+        console.print(f"[red]Failed[/red]: {exc}")
+        console.print(f"[dim]Final console state:[/dim] {final_state}")
+        time.sleep(1.2)
+        raise
+    finally:
+        logging.getLogger().removeHandler(log_handler)
+        dashboard.stop()
 
 
 @app.command()
