@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import multiprocessing as mp
 import shutil
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty
@@ -13,10 +14,11 @@ import psutil
 from .config import AppConfig
 from .db import Registry
 from .ingest_worker import parse_and_write_canonical
-from .memory import GIB, MemoryPolicy, process_tree_rss
+from .memory import GIB, MemoryPolicy, MemoryPressureGate, process_tree_rss
 
 
 IngestProgress = Callable[[dict[str, Any]], None]
+MAX_MEMORY_RETRIES = 3
 
 
 @dataclass(slots=True)
@@ -24,6 +26,8 @@ class IngestStats:
     ready: int = 0
     skipped: int = 0
     failed: int = 0
+    deferred_memory: int = 0
+    retried_memory: int = 0
     visual_documents: int = 0
     visual_segments: int = 0
 
@@ -32,9 +36,21 @@ class IngestStats:
             "ready": self.ready,
             "skipped": self.skipped,
             "failed": self.failed,
+            "deferred_memory": self.deferred_memory,
+            "retried_memory": self.retried_memory,
             "visual_documents": self.visual_documents,
             "visual_segments": self.visual_segments,
         }
+
+
+def _looks_like_memory_error(message: str) -> bool:
+    lowered = message.lower()
+    return (
+        "memoryerror" in lowered
+        or "cannot allocate memory" in lowered
+        or "errno 12" in lowered
+        or "memorypressureerror" in lowered
+    )
 
 
 def ingest_corpus(
@@ -42,17 +58,12 @@ def ingest_corpus(
     *,
     force: bool = False,
     progress: IngestProgress | None = None,
+    memory_gate: MemoryPressureGate | None = None,
 ) -> IngestStats:
-    """Parse corpus safely, one isolated source process at a time.
-
-    A pathological PDF/PPT/JSON can no longer consume the entire workstation:
-    each source is parsed in a child process whose RSS is monitored. If either
-    the worker exceeds its internal budget or system available memory falls
-    below the reserved safety margin, only that worker is terminated.
-    """
+    """Parse one source per isolated worker without treating RAM pressure as failure."""
     registry = Registry(cfg.registry_path)
     stats = IngestStats()
-    policy = MemoryPolicy.auto()
+    policy = memory_gate.policy if memory_gate is not None else MemoryPolicy.auto()
     ctx = mp.get_context("spawn")
 
     def emit(**extra: Any) -> None:
@@ -63,9 +74,11 @@ def ingest_corpus(
         payload.update(extra)
         progress(payload)
 
-    emit(stage="ingest_start")
+    queue = deque((row, 0) for row in registry.list_active_unique_content())
+    emit(stage="ingest_start", queued=len(queue))
 
-    for row in registry.list_active_unique_content():
+    while queue:
+        row, attempt = queue.popleft()
         content_hash = row["content_hash"]
         source_path = Path(row["source_path"])
         existing = registry.get_artifact(content_hash, cfg.parser_version)
@@ -77,52 +90,71 @@ def ingest_corpus(
                 emit(
                     current_parse_file=str(source_path),
                     parse_state="cached",
+                    memory_tier=0,
                     worker_rss_gb=0.0,
                     memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
+                    queued=len(queue),
                 )
                 continue
+
+        if memory_gate is not None:
+            if memory_gate.paused:
+                emit(
+                    current_parse_file=str(source_path),
+                    parse_state="paused_memory",
+                    pause_reason=memory_gate.reason,
+                    memory_tier=min(attempt, 2),
+                    worker_rss_gb=0.0,
+                    memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
+                    queued=len(queue) + 1,
+                )
+            memory_gate.wait_until_safe(context=f"parsing {source_path.name}")
 
         canonical_path = (
             cfg.canonical_dir
             / content_hash[:2]
             / f"{content_hash}.{cfg.parser_version}.json"
         ).resolve()
-        asset_dir = (cfg.assets_dir / content_hash[:2] / content_hash / cfg.parser_version).resolve()
+        asset_dir = (
+            cfg.assets_dir
+            / content_hash[:2]
+            / content_hash
+            / cfg.parser_version
+        ).resolve()
 
         gc.collect()
         available = int(psutil.virtual_memory().available)
         if available < policy.reserve_system_bytes:
-            error = (
-                "MemoryPressureError: available system memory "
-                f"{available / GIB:.2f} GB is below Oracle-Lite reserve "
-                f"{policy.reserve_system_bytes / GIB:.2f} GB before parsing "
-                f"{source_path}"
+            reason = (
+                f"Available RAM {available / GIB:.2f} GiB below reserve "
+                f"{policy.reserve_system_bytes / GIB:.2f} GiB before parsing "
+                f"{source_path.name}"
             )
-            registry.save_artifact(
-                content_hash=content_hash,
-                parser_version=cfg.parser_version,
-                canonical_path=None,
-                status="failed",
-                error=error,
-            )
-            stats.failed += 1
-            emit(
-                current_parse_file=str(source_path),
-                parse_state="memory_blocked",
-                worker_rss_gb=0.0,
-                memory_available_gb=round(available / GIB, 2),
-                error=error,
-            )
-            continue
+            if memory_gate is not None:
+                memory_gate.request_pause(reason)
+                emit(
+                    current_parse_file=str(source_path),
+                    parse_state="paused_memory",
+                    pause_reason=reason,
+                    memory_tier=min(attempt, 2),
+                    worker_rss_gb=0.0,
+                    memory_available_gb=round(available / GIB, 2),
+                    queued=len(queue) + 1,
+                )
+                memory_gate.wait_until_safe(context=f"parsing {source_path.name}")
+                queue.appendleft((row, attempt))
+                continue
 
-        # Remove leftovers from an interrupted/failed previous parse. Canonical
-        # artifacts are immutable once marked ready, so this only affects work
-        # that never completed successfully.
         tmp_path = canonical_path.with_suffix(canonical_path.suffix + ".tmp")
+        sidecar_tmp = canonical_path.with_suffix(
+            canonical_path.suffix + ".segments.jsonl.tmp"
+        )
         tmp_path.unlink(missing_ok=True)
+        sidecar_tmp.unlink(missing_ok=True)
         if asset_dir.exists():
             shutil.rmtree(asset_dir, ignore_errors=True)
 
+        memory_tier = min(attempt, 2)
         result_queue = ctx.Queue(maxsize=1)
         proc = ctx.Process(
             target=parse_and_write_canonical,
@@ -134,6 +166,7 @@ def ingest_corpus(
                 "parser_version": cfg.parser_version,
                 "result_queue": result_queue,
                 "address_space_limit_bytes": policy.max_worker_address_space_bytes,
+                "memory_tier": memory_tier,
             },
             name=f"oracle-ingest-{content_hash[:8]}",
         )
@@ -141,12 +174,15 @@ def ingest_corpus(
         emit(
             current_parse_file=str(source_path),
             parse_state="starting",
+            memory_tier=memory_tier,
+            retry=attempt,
             worker_rss_gb=0.0,
             memory_available_gb=round(available / GIB, 2),
+            queued=len(queue),
         )
         proc.start()
 
-        memory_error: str | None = None
+        pressure_reason: str | None = None
         while proc.is_alive():
             proc.join(timeout=0.20)
             worker_rss = process_tree_rss(proc.pid or -1)
@@ -155,35 +191,36 @@ def ingest_corpus(
             emit(
                 current_parse_file=str(source_path),
                 parse_state="parsing",
+                memory_tier=memory_tier,
+                retry=attempt,
                 worker_rss_gb=round(worker_rss / GIB, 2),
                 memory_available_gb=round(available / GIB, 2),
+                queued=len(queue),
             )
 
             if worker_rss > policy.max_worker_rss_bytes:
-                memory_error = (
-                    "MemoryPressureError: parser worker exceeded safe RSS cap "
-                    f"({worker_rss / GIB:.2f} GB > "
-                    f"{policy.max_worker_rss_bytes / GIB:.2f} GB) while parsing "
-                    f"{source_path}"
+                pressure_reason = (
+                    f"Parser worker reached {worker_rss / GIB:.2f} GiB RSS "
+                    f"(cap {policy.max_worker_rss_bytes / GIB:.2f} GiB)"
                 )
             elif available < policy.reserve_system_bytes:
-                memory_error = (
-                    "MemoryPressureError: system available memory fell below "
-                    f"reserve ({available / GIB:.2f} GB < "
-                    f"{policy.reserve_system_bytes / GIB:.2f} GB) while parsing "
-                    f"{source_path}"
+                pressure_reason = (
+                    f"Available RAM fell to {available / GIB:.2f} GiB "
+                    f"(reserve {policy.reserve_system_bytes / GIB:.2f} GiB)"
                 )
+            elif memory_gate is not None and memory_gate.paused:
+                pressure_reason = memory_gate.reason or "Host memory pressure"
 
-            if memory_error:
+            if pressure_reason:
                 proc.terminate()
-                proc.join(timeout=3.0)
+                proc.join(timeout=2.0)
                 if proc.is_alive():
                     proc.kill()
                     proc.join(timeout=1.0)
                 break
 
         result: dict[str, Any] | None = None
-        if memory_error is None:
+        if pressure_reason is None:
             try:
                 result = result_queue.get(timeout=2.0)
             except Empty:
@@ -195,9 +232,61 @@ def ingest_corpus(
         except Exception:
             pass
 
-        if memory_error is not None:
-            error = memory_error
-        elif result is None:
+        if result is not None and not result.get("ok"):
+            worker_error = str(result.get("error") or "ParserWorkerError")
+            if _looks_like_memory_error(worker_error):
+                pressure_reason = worker_error
+
+        if pressure_reason is not None:
+            stats.retried_memory += 1
+            tmp_path.unlink(missing_ok=True)
+            sidecar_tmp.unlink(missing_ok=True)
+            if asset_dir.exists():
+                shutil.rmtree(asset_dir, ignore_errors=True)
+
+            if memory_gate is not None:
+                memory_gate.request_pause(
+                    f"{source_path.name}: {pressure_reason}",
+                    minimum_seconds=2.0,
+                )
+                emit(
+                    current_parse_file=str(source_path),
+                    parse_state="paused_memory",
+                    pause_reason=pressure_reason,
+                    memory_tier=memory_tier,
+                    retry=attempt,
+                    worker_rss_gb=0.0,
+                    memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
+                    queued=len(queue) + 1,
+                )
+                memory_gate.wait_until_safe(context=f"retrying {source_path.name}")
+
+            if attempt + 1 < MAX_MEMORY_RETRIES:
+                queue.append((row, attempt + 1))
+                continue
+
+            # Memory pressure is a deferral, never a red parser failure.
+            registry.save_artifact(
+                content_hash=content_hash,
+                parser_version=cfg.parser_version,
+                canonical_path=None,
+                status="deferred_memory",
+                error=pressure_reason,
+            )
+            stats.deferred_memory += 1
+            emit(
+                current_parse_file=str(source_path),
+                parse_state="deferred_memory",
+                pause_reason=pressure_reason,
+                memory_tier=memory_tier,
+                retry=attempt,
+                worker_rss_gb=0.0,
+                memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
+                queued=len(queue),
+            )
+            continue
+
+        if result is None:
             error = (
                 "ParserWorkerError: parser process exited without a result "
                 f"(exitcode={proc.exitcode}) for {source_path}"
@@ -220,9 +309,11 @@ def ingest_corpus(
             emit(
                 current_parse_file=str(source_path),
                 parse_state="failed",
+                error=error,
+                memory_tier=memory_tier,
                 worker_rss_gb=0.0,
                 memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
-                error=error,
+                queued=len(queue),
             )
             continue
 
@@ -241,8 +332,11 @@ def ingest_corpus(
         emit(
             current_parse_file=str(source_path),
             parse_state="ready",
+            memory_tier=memory_tier,
+            retry=attempt,
             worker_rss_gb=0.0,
             memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
+            queued=len(queue),
         )
         gc.collect()
 
@@ -252,5 +346,6 @@ def ingest_corpus(
         parse_state="complete",
         worker_rss_gb=0.0,
         memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
+        queued=0,
     )
     return stats
