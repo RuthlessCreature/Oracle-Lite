@@ -114,7 +114,7 @@ def ingest_corpus(
         ).resolve()
 
         attempt = 0
-        low_memory = False
+        memory_level = 0
 
         while True:
             attempt += 1
@@ -151,16 +151,17 @@ def ingest_corpus(
                     "parser_version": cfg.parser_version,
                     "result_queue": result_queue,
                     "address_space_limit_bytes": policy.max_worker_address_space_bytes,
-                    "low_memory": low_memory,
+                    "low_memory": memory_level > 0,
+                    "memory_level": memory_level,
                 },
                 name=f"oracle-ingest-{content_hash[:8]}",
             )
 
             emit(
                 current_parse_file=str(source_path),
-                parse_state="starting_low_memory" if low_memory else "starting",
+                parse_state="starting_low_memory" if memory_level > 0 else "starting",
                 retry_attempt=attempt,
-                low_memory_mode=low_memory,
+                low_memory_mode=memory_level > 0,
                 worker_rss_gb=0.0,
                 memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
             )
@@ -174,9 +175,9 @@ def ingest_corpus(
 
                 emit(
                     current_parse_file=str(source_path),
-                    parse_state="parsing_low_memory" if low_memory else "parsing",
+                    parse_state="parsing_low_memory" if memory_level > 0 else "parsing",
                     retry_attempt=attempt,
-                    low_memory_mode=low_memory,
+                    low_memory_mode=memory_level > 0,
                     worker_rss_gb=round(worker_rss / GIB, 2),
                     memory_available_gb=round(available / GIB, 2),
                 )
@@ -230,19 +231,19 @@ def ingest_corpus(
                     parse_state="deferred_memory",
                     memory_reason=reason,
                     retry_attempt=attempt,
-                    low_memory_mode=low_memory,
+                    low_memory_mode=memory_level > 0,
                     worker_rss_gb=0.0,
                     memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
                 )
 
-                low_memory = True
+                memory_level = min(3, memory_level + 1)
                 wait_memory(source_path, reason, attempt)
                 continue
 
             if result is None:
                 stats.memory_retries += 1
                 reason = f"worker exited without result (exitcode={proc.exitcode})"
-                low_memory = True
+                memory_level = min(3, memory_level + 1)
                 wait_memory(source_path, reason, attempt)
                 continue
 
@@ -260,7 +261,7 @@ def ingest_corpus(
                     current_parse_file=str(source_path),
                     parse_state="failed",
                     retry_attempt=attempt,
-                    low_memory_mode=low_memory,
+                    low_memory_mode=memory_level > 0,
                     worker_rss_gb=0.0,
                     memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
                     error=error,
@@ -283,7 +284,7 @@ def ingest_corpus(
                 current_parse_file=str(source_path),
                 parse_state="ready",
                 retry_attempt=attempt,
-                low_memory_mode=low_memory,
+                low_memory_mode=memory_level > 0,
                 worker_rss_gb=0.0,
                 memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
             )
