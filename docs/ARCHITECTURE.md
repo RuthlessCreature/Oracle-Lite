@@ -1,19 +1,18 @@
-# Architecture
+# Oracle-Lite V0.2 Architecture
 
-## 1. System boundary
+## 1. Hard requirements
 
-Oracle-Lite separates four concerns:
+Oracle-Lite is multimodal by default.
 
-1. **Mutable source corpus** — files can appear, disappear, move or change.
-2. **Deterministic data factory** — hashes, parses and records lineage.
-3. **Immutable dataset snapshots** — fixed inputs for training/evaluation.
-4. **Local model training** — consumes one explicit snapshot and writes checkpoints under the configured output root.
+The system must preserve both semantic text and source visuals from heterogeneous documents. A VLM checkpoint loaded with text-only datasets does not satisfy this requirement.
 
-MiniMax M3 is outside the source-of-truth chain. It is an optional Data Janitor for low-risk enrichment only.
+Default base model:
+
+```text
+Qwen/Qwen3.5-9B-Base
+```
 
 ## 2. Three-field configuration contract
-
-User configuration contains only:
 
 ```yaml
 minimax_api_key: "..."
@@ -21,84 +20,150 @@ corpus_dir: "..."
 output_dir: "..."
 ```
 
-Everything else is an implementation default.
+No base-model path is configured. Oracle-Lite owns model selection and download.
 
-This is deliberate: training reproducibility must come from recorded run metadata and immutable snapshots, not from a growing hand-edited YAML file.
+## 3. Source layer
 
-## 3. Dynamic corpus identity
+Supported source classes:
 
-The scanner uses two levels:
+- TXT / Markdown / CSV;
+- JSON / JSONL;
+- PDF;
+- DOCX;
+- PPTX;
+- PNG / JPG / JPEG / WebP / BMP / TIFF.
 
-- `size + mtime_ns` as a fast path;
-- SHA-256 as authoritative content identity.
+The source directory is mutable.
 
-Consequences:
-
-- same bytes at another path => one content object;
-- rename/move => path history changes, content identity does not;
-- modified file => new content hash / new revision;
-- deletion => tombstone, never historical erasure.
-
-## 4. Immutable snapshot rule
-
-A training run never reads directly from `corpus_dir`.
+## 4. Identity and lineage
 
 ```text
-mutable corpus
-  -> registry
-  -> canonical artifacts
-  -> immutable snapshot manifest
-  -> sharded dataset
-  -> training run
+size + mtime
+   -> fast unchanged check
+SHA-256
+   -> authoritative content identity
 ```
 
-Once created, a snapshot manifest is not edited in place.
+Rename/move does not duplicate content. A changed file becomes a new revision. Deletion creates a tombstone.
 
-## 5. Incremental CPT
+## 5. Multimodal Canonical Layer
 
-Incremental training should not mean "train only the newest files forever".
-
-Oracle-Lite snapshot mode supports:
+A canonical document contains:
 
 ```text
-incremental set = new content + historical replay
+document
+├── content_hash
+├── source_path
+├── text
+├── metadata
+└── segments[]
+    ├── text
+    ├── images[]
+    └── metadata
 ```
 
-The replay ratio is selected at snapshot creation. V0.1 defaults to 20% replay when incremental mode is used.
+The important unit is the segment:
 
-A later milestone can add a separate general-domain replay lane to further reduce catastrophic forgetting.
+- PDF => one segment per page;
+- PPTX => one segment per slide;
+- DOCX => document-level segment with extracted media in V0.2;
+- native image => visual segment.
 
-## 6. Data Janitor boundary
+## 6. Visual asset policy
 
-MiniMax M3 may produce metadata artifacts derived from source material, but its output cannot silently replace source text.
+Visual assets are copied/rendered under:
 
-Allowed:
+```text
+output_dir/assets/<hash-prefix>/<content-hash>/
+```
 
-- document class;
-- language/domain tags;
-- quality flags;
-- section/title recovery;
-- formatting assistance;
-- source-grounded paraphrase.
+Generated assets never live under `corpus_dir`.
 
-Forbidden as authoritative training truth:
+PDF pages are rasterized at 1.5x. Office vector formats that common image loaders cannot safely decode are excluded in V0.2 rather than silently fed into the processor.
 
-- invented answers;
-- missing-fact completion;
-- changed measurements/codes/versions;
-- unsourced causal explanations;
-- synthetic expert reasoning presented as fact.
+## 7. Dataset objective
 
-## 7. RTX 4080 training boundary
+The domain dataset mixes two objectives.
 
-The built-in V0.1 profile targets one RTX 4080 16GB and favors memory safety over throughput.
+### Text lane
 
-Training parameters are internal code defaults and are written into each run's `run.json` so a completed run remains auditable even though the user config stays minimal.
+Source text is used for ordinary causal language modeling.
 
-## 8. Failure policy
+### Visual lane
 
-A failed parser produces a recorded failed artifact instead of silently dropping a source.
+Only records with both:
 
-A failed training run is marked `failed` in the registry and preserves existing checkpoints.
+- source visual asset;
+- source-grounded text;
 
-Generated output is never placed under the source corpus.
+enter visual supervision.
+
+The deterministic target is text extracted from that same source page/slide/document. MiniMax does not invent the answer.
+
+Unlabeled visual records are retained but filtered out of the current training loss.
+
+## 8. Model lifecycle
+
+```text
+Qwen/Qwen3.5-9B-Base
+        |
+        v
+output/models/Qwen3.5-9B-Base
+        |
+        v
+4-bit load
+        |
+        v
+native AutoProcessor + AutoModelForMultimodalLM
+        |
+        v
+QLoRA domain adaptation
+```
+
+The model is downloaded once through Hugging Face Hub and reused locally.
+
+## 9. RTX 4080 policy
+
+One RTX 4080 16GB is the design envelope.
+
+Therefore V0.2 uses:
+
+- 4-bit NF4;
+- BF16 compute;
+- batch size 1;
+- gradient checkpointing;
+- LoRA rank 8;
+- long gradient accumulation;
+- processor-native multimodal image handling;
+- frozen base vision parameters.
+
+Freezing the vision tower means its original weights do not receive optimizer state. It does **not** mean images are removed from the forward pass.
+
+## 10. Snapshot boundary
+
+Training never reads directly from the mutable corpus.
+
+```text
+corpus
+-> registry
+-> canonical text/assets
+-> immutable snapshot
+-> mixed domain shards
+-> training run
+```
+
+A corpus change during a run affects only future snapshots.
+
+## 11. MiniMax boundary
+
+MiniMax M3 is a Data Janitor only.
+
+Its output may enrich metadata, but it cannot silently replace source truth used as a training target.
+
+## 12. Failure policy
+
+- parser failures are recorded;
+- unsupported visual assets are skipped explicitly;
+- image-only samples without reliable text are not fabricated into supervised examples;
+- failed training runs retain checkpoints;
+- every completed run records base model ID, snapshot ID and preset values.
