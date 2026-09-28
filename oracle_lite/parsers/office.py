@@ -1,13 +1,46 @@
 from __future__ import annotations
 
+import zipfile
 from pathlib import Path
 
+import pymupdf as fitz
 from docx import Document
-from pypdf import PdfReader
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+from .base import ParsedDocument, ParsedSegment
 
 
-def parse_docx(path: Path) -> tuple[str, str, dict]:
+RASTER_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+
+
+def _safe_suffix(name: str, fallback: str = ".png") -> str:
+    suffix = Path(name).suffix.lower()
+    return suffix if suffix else fallback
+
+
+def _extract_zip_media(path: Path, asset_dir: Path, prefix: str) -> list[str]:
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    assets: list[str] = []
+    with zipfile.ZipFile(path) as zf:
+        names = sorted(
+            name
+            for name in zf.namelist()
+            if name.startswith(prefix) and not name.endswith("/")
+        )
+        kept = 0
+        for name in names:
+            suffix = _safe_suffix(name)
+            if suffix not in RASTER_EXTENSIONS:
+                continue
+            kept += 1
+            target = asset_dir / f"media-{kept:04d}{suffix}"
+            target.write_bytes(zf.read(name))
+            assets.append(str(target.resolve()))
+    return assets
+
+
+def parse_docx(path: Path, asset_dir: Path) -> ParsedDocument:
     doc = Document(path)
     blocks: list[str] = []
     headings = 0
@@ -29,7 +62,10 @@ def parse_docx(path: Path) -> tuple[str, str, dict]:
             blocks.append(text)
 
     for table in doc.tables:
-        rows = [[cell.text.strip().replace("\n", " ") for cell in row.cells] for row in table.rows]
+        rows = [
+            [cell.text.strip().replace("\n", " ") for cell in row.cells]
+            for row in table.rows
+        ]
         if not rows:
             continue
         width = max(len(r) for r in rows)
@@ -40,41 +76,78 @@ def parse_docx(path: Path) -> tuple[str, str, dict]:
             blocks.append("| " + " | ".join(row) + " |")
         tables += 1
 
-    return path.stem, "\n\n".join(blocks), {
-        "extension": ".docx",
-        "headings": headings,
-        "tables": tables,
-    }
+    text = "\n\n".join(blocks)
+    images = _extract_zip_media(path, asset_dir, "word/media/")
+    return ParsedDocument(
+        title=path.stem,
+        text=text,
+        segments=[ParsedSegment(text=text, images=images, metadata={"kind": "docx"})],
+        metadata={
+            "extension": ".docx",
+            "headings": headings,
+            "tables": tables,
+            "images": len(images),
+        },
+    )
 
 
-def parse_pdf(path: Path) -> tuple[str, str, dict]:
-    reader = PdfReader(str(path))
+def parse_pdf(path: Path, asset_dir: Path) -> ParsedDocument:
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open(path)
+    segments: list[ParsedSegment] = []
     pages: list[str] = []
     empty_pages = 0
 
-    for idx, page in enumerate(reader.pages, start=1):
-        text = (page.extract_text() or "").strip()
-        if not text:
-            empty_pages += 1
-            continue
-        pages.append(f"## Page {idx}\n\n{text}")
+    try:
+        for idx, page in enumerate(doc, start=1):
+            text = page.get_text("text").strip()
+            if not text:
+                empty_pages += 1
 
-    return path.stem, "\n\n".join(pages), {
-        "extension": ".pdf",
-        "pages": len(reader.pages),
-        "empty_pages": empty_pages,
-        "needs_ocr": empty_pages == len(reader.pages) and len(reader.pages) > 0,
-    }
+            # Preserve the actual page as the visual truth. 1.5x keeps diagrams
+            # and tables legible while avoiding absurd raster sizes on a 4080.
+            pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+            image_path = asset_dir / f"page-{idx:04d}.png"
+            pix.save(str(image_path))
+
+            page_text = f"## Page {idx}\n\n{text}" if text else f"## Page {idx}"
+            pages.append(page_text)
+            segments.append(
+                ParsedSegment(
+                    text=text,
+                    images=[str(image_path.resolve())],
+                    metadata={"kind": "pdf_page", "page": idx},
+                )
+            )
+    finally:
+        doc.close()
+
+    return ParsedDocument(
+        title=path.stem,
+        text="\n\n".join(pages),
+        segments=segments,
+        metadata={
+            "extension": ".pdf",
+            "pages": len(segments),
+            "empty_pages": empty_pages,
+            "images": len(segments),
+        },
+    )
 
 
-def parse_pptx(path: Path) -> tuple[str, str, dict]:
+def parse_pptx(path: Path, asset_dir: Path) -> ParsedDocument:
     prs = Presentation(path)
-    slides: list[str] = []
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    segments: list[ParsedSegment] = []
+    slide_blocks: list[str] = []
     table_count = 0
+    image_count = 0
 
     for slide_idx, slide in enumerate(prs.slides, start=1):
         items: list[tuple[int, int, str]] = []
-        for shape in slide.shapes:
+        slide_images: list[str] = []
+
+        for shape_idx, shape in enumerate(slide.shapes, start=1):
             top = int(getattr(shape, "top", 0))
             left = int(getattr(shape, "left", 0))
 
@@ -88,25 +161,51 @@ def parse_pptx(path: Path) -> tuple[str, str, dict]:
                     items.append((top, left, text))
 
             if getattr(shape, "has_table", False):
-                rows = []
-                for row in shape.table.rows:
-                    rows.append([cell.text.strip().replace("\n", " ") for cell in row.cells])
+                rows = [
+                    [cell.text.strip().replace("\n", " ") for cell in row.cells]
+                    for row in shape.table.rows
+                ]
                 if rows:
                     width = max(len(r) for r in rows)
                     rows = [r + [""] * (width - len(r)) for r in rows]
-                    md = ["| " + " | ".join(rows[0]) + " |",
-                          "| " + " | ".join(["---"] * width) + " |"]
+                    md = [
+                        "| " + " | ".join(rows[0]) + " |",
+                        "| " + " | ".join(["---"] * width) + " |",
+                    ]
                     md.extend("| " + " | ".join(r) + " |" for r in rows[1:])
                     items.append((top, left, "\n".join(md)))
                     table_count += 1
 
+            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                ext = _safe_suffix(shape.image.filename, ".png")
+                if ext in RASTER_EXTENSIONS:
+                    target = (
+                        asset_dir
+                        / f"slide-{slide_idx:04d}-image-{shape_idx:03d}{ext}"
+                    )
+                    target.write_bytes(shape.image.blob)
+                    slide_images.append(str(target.resolve()))
+                    image_count += 1
+
         items.sort(key=lambda x: (x[0], x[1]))
         body = "\n\n".join(text for _, _, text in items)
-        if body:
-            slides.append(f"## Slide {slide_idx}\n\n{body}")
+        slide_blocks.append(f"## Slide {slide_idx}\n\n{body}".rstrip())
+        segments.append(
+            ParsedSegment(
+                text=body,
+                images=slide_images,
+                metadata={"kind": "pptx_slide", "slide": slide_idx},
+            )
+        )
 
-    return path.stem, "\n\n".join(slides), {
-        "extension": ".pptx",
-        "slides": len(prs.slides),
-        "tables": table_count,
-    }
+    return ParsedDocument(
+        title=path.stem,
+        text="\n\n".join(slide_blocks),
+        segments=segments,
+        metadata={
+            "extension": ".pptx",
+            "slides": len(prs.slides),
+            "tables": table_count,
+            "images": image_count,
+        },
+    )

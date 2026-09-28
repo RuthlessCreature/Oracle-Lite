@@ -8,6 +8,13 @@ from typing import Any
 
 
 @dataclass(slots=True)
+class CanonicalSegment:
+    text: str
+    images: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class CanonicalDocument:
     content_hash: str
     source_path: str
@@ -16,6 +23,7 @@ class CanonicalDocument:
     parser_version: str
     text: str
     title: str | None = None
+    segments: list[CanonicalSegment] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     extracted_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -32,4 +40,5 @@ class CanonicalDocument:
     @classmethod
     def read_json(cls, path: str | Path) -> "CanonicalDocument":
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        raw["segments"] = [CanonicalSegment(**item) for item in raw.get("segments", [])]
         return cls(**raw)

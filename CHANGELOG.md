@@ -1,22 +1,36 @@
 # Changelog
 
+## 0.2.0 - 2026-09-28
+
+### Changed
+- Oracle-Lite is now multimodal by default.
+- Default base model is Qwen/Qwen3.5-9B-Base.
+- Base model is downloaded automatically into output/models.
+- Training uses AutoProcessor and AutoModelForMultimodalLM.
+- User no longer supplies a base-model path.
+- Canonical data now contains segment-level image assets.
+- PDF pages are rasterized and paired with same-page text.
+- PPTX slide images are paired with slide text.
+- Native image files are accepted as corpus sources.
+- RTX 4080 preset freezes base vision parameters while keeping native visual forward processing.
+
+### Added
+- Multimodal canonical segments.
+- Visual asset store.
+- Mixed text/visual domain dataset.
+- Native image parser.
+- Automatic Hugging Face model downloader.
+- Multimodal parser tests.
+
+### Safety / data quality
+- Image-only records without source-grounded text are preserved but excluded from supervised visual loss.
+- MiniMax remains a non-authoritative Data Janitor.
+
 ## 0.1.0 - 2026-09-28
 
 ### Added
-- Dynamic single-folder corpus scanner.
-- SHA-256 content identity, revisions, duplicate detection and tombstones.
-- Canonical parsers for text, JSON/JSONL, PDF, DOCX and PPTX.
-- Immutable full and incremental snapshots.
-- Historical replay for incremental CPT snapshots.
-- Sharded CPT dataset builder.
-- Built-in RTX 4080 16GB QLoRA CPT preset.
-- Automatic local checkpoint resume.
-- MiniMax M3 Token Plan client constrained to Data Janitor tasks.
-- Three-field user config: MiniMax key, corpus path, output path.
-- One-command `prepare` pipeline.
-- Core tests and GitHub Actions CI.
-
-### Known limitations
-- OCR for scanned/image-only PDFs is not implemented.
-- Complex PPT/PDF graphics are not semantically reconstructed.
-- SFT, RAG and full evaluation gates are future milestones.
+- Dynamic corpus scanning and SHA-256 lineage.
+- Immutable snapshots.
+- Text-oriented domain dataset.
+- MiniMax M3 Data Janitor integration.
+- Three-field user configuration.
