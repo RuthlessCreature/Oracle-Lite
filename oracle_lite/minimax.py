@@ -10,7 +10,7 @@ from .config import AppConfig
 
 
 MINIMAX_M3_MODEL = "MiniMax-M3"
-MINIMAX_CHAT_URL = "https://api.minimax.io/v1/text/chatcompletion_v2"
+MINIMAX_CHAT_URL = "https://api.minimaxi.com/v1/text/chatcompletion_v2"
 
 JANITOR_SYSTEM_PROMPT = """You are Oracle-Lite Data Janitor.
 Your job is limited to low-risk data chores: classification, metadata extraction,
