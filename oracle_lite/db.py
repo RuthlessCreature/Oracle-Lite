@@ -105,6 +105,11 @@ class Registry:
     def connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
+        # Keep SQLite memory predictable for very large corpora. Expensive
+        # GROUP BY / EXCEPT / ORDER BY work spills to disk instead of RAM.
+        conn.execute("PRAGMA temp_store=FILE")
+        conn.execute("PRAGMA cache_size=-65536")
+        conn.execute("PRAGMA mmap_size=0")
         try:
             yield conn
             conn.commit()
@@ -174,7 +179,27 @@ class Registry:
             ).fetchall()
             return [r["path"] for r in rows]
 
+    def has_other_active_path_for_hash(
+        self,
+        content_hash: str,
+        path: str | Path,
+    ) -> bool:
+        path_s = str(Path(path).resolve())
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT 1
+                     FROM source_files
+                    WHERE content_hash=?
+                      AND status='active'
+                      AND path<>?
+                    LIMIT 1""",
+                (content_hash, path_s),
+            ).fetchone()
+            return row is not None
+
     def list_active_unique_content(self):
+        # Backward-compatible small-data helper. Prefer iter_active_unique_content()
+        # in memory-sensitive pipeline code.
         with self.connect() as conn:
             return conn.execute(
                 """SELECT sf.content_hash, MIN(sf.path) AS source_path, MAX(sf.size) AS size
@@ -183,6 +208,18 @@ class Registry:
                    GROUP BY sf.content_hash
                    ORDER BY source_path"""
             ).fetchall()
+
+    def iter_active_unique_content(self):
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """SELECT sf.content_hash, MIN(sf.path) AS source_path, MAX(sf.size) AS size
+                   FROM source_files sf
+                   WHERE sf.status='active'
+                   GROUP BY sf.content_hash
+                   ORDER BY source_path"""
+            )
+            for row in cursor:
+                yield row
 
     def get_artifact(self, content_hash: str, parser_version: str):
         with self.connect() as conn:
@@ -234,6 +271,7 @@ class Registry:
             return conn.execute("SELECT * FROM snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
 
     def active_ready_hashes(self, parser_version: str) -> set[str]:
+        # Compatibility helper; one-click pipeline uses SQL matching below.
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT DISTINCT sf.content_hash
@@ -247,6 +285,70 @@ class Registry:
                 (parser_version,),
             ).fetchall()
             return {row["content_hash"] for row in rows}
+
+    def active_ready_count(self, parser_version: str) -> int:
+        with self.connect() as conn:
+            return int(conn.execute(
+                """SELECT COUNT(DISTINCT sf.content_hash) AS n
+                   FROM source_files sf
+                   JOIN derived_artifacts da
+                     ON da.content_hash=sf.content_hash
+                    AND da.parser_version=?
+                   WHERE sf.status='active'
+                     AND da.status='ready'
+                     AND da.canonical_path IS NOT NULL""",
+                (parser_version,),
+            ).fetchone()["n"])
+
+    def snapshot_matches_active_ready(
+        self,
+        snapshot_id: str,
+        parser_version: str,
+    ) -> bool:
+        """Compare snapshot/current content entirely in SQLite, without Python sets."""
+        with self.connect() as conn:
+            active_minus_snapshot = conn.execute(
+                """SELECT 1
+                     FROM (
+                         SELECT DISTINCT sf.content_hash
+                           FROM source_files sf
+                           JOIN derived_artifacts da
+                             ON da.content_hash=sf.content_hash
+                            AND da.parser_version=?
+                          WHERE sf.status='active'
+                            AND da.status='ready'
+                            AND da.canonical_path IS NOT NULL
+                         EXCEPT
+                         SELECT DISTINCT content_hash
+                           FROM snapshot_members
+                          WHERE snapshot_id=?
+                     )
+                    LIMIT 1""",
+                (parser_version, snapshot_id),
+            ).fetchone()
+            if active_minus_snapshot is not None:
+                return False
+
+            snapshot_minus_active = conn.execute(
+                """SELECT 1
+                     FROM (
+                         SELECT DISTINCT content_hash
+                           FROM snapshot_members
+                          WHERE snapshot_id=?
+                         EXCEPT
+                         SELECT DISTINCT sf.content_hash
+                           FROM source_files sf
+                           JOIN derived_artifacts da
+                             ON da.content_hash=sf.content_hash
+                            AND da.parser_version=?
+                          WHERE sf.status='active'
+                            AND da.status='ready'
+                            AND da.canonical_path IS NOT NULL
+                     )
+                    LIMIT 1""",
+                (snapshot_id, parser_version),
+            ).fetchone()
+            return snapshot_minus_active is None
 
     def latest_snapshot(self, mode: str | None = None):
         with self.connect() as conn:

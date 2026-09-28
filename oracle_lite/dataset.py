@@ -7,6 +7,7 @@ from pathlib import Path
 from .canonical import CanonicalDocument
 from .config import AppConfig
 from .db import Registry
+from .resources import GIB, HostResourcePolicy, wait_for_disk
 
 
 @dataclass(slots=True)
@@ -27,6 +28,7 @@ def build_domain_dataset(
 ) -> DatasetResult:
     """Build mixed text + image/text domain records with bounded memory."""
     registry = Registry(cfg.registry_path)
+    resource_policy = HostResourcePolicy.auto(cfg.output_dir)
     snap = registry.get_snapshot(snapshot_id)
     if snap is None:
         raise ValueError(f"Unknown snapshot: {snapshot_id}")
@@ -53,6 +55,16 @@ def build_domain_dataset(
 
     def write_record(record: dict) -> None:
         nonlocal shard, shard_idx, in_shard, records
+        # Dataset records are bounded, but disk admission is rechecked
+        # periodically so long builds cannot consume the OS reserve.
+        if records % 25 == 0:
+            wait_for_disk(
+                cfg.output_dir,
+                resource_policy,
+                required_bytes=1 * GIB,
+                poll_seconds=2.0,
+                stable_samples=1,
+            )
         if shard is None or in_shard >= max_records_per_shard:
             if shard is not None:
                 shard.close()
@@ -146,6 +158,13 @@ def build_domain_dataset(
         "characters": characters,
         "shards": [p.name for p in shard_paths],
     }
+    wait_for_disk(
+        cfg.output_dir,
+        resource_policy,
+        required_bytes=1 * GIB,
+        poll_seconds=2.0,
+        stable_samples=1,
+    )
     (output_dir / "dataset.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",

@@ -39,7 +39,6 @@ def _snapshot_matches_current(
     snapshot_row,
     *,
     parser_version: str,
-    active_hashes: set[str],
 ) -> bool:
     if snapshot_row is None:
         return False
@@ -52,7 +51,10 @@ def _snapshot_matches_current(
     if snapshot_cfg.get("parser_version") != parser_version:
         return False
 
-    return registry.snapshot_hashes(snapshot_row["snapshot_id"]) == active_hashes
+    return registry.snapshot_matches_active_ready(
+        snapshot_row["snapshot_id"],
+        parser_version,
+    )
 
 
 def _dataset_meta(cfg: AppConfig, snapshot_id: str) -> tuple[Path, Path]:
@@ -93,7 +95,10 @@ def _is_fully_trained(cfg: AppConfig, registry: Registry, snapshot_id: str) -> b
     except json.JSONDecodeError:
         return False
 
-    # Smoke tests use max_steps >= 0 and must never mark the snapshot as fully done.
+    # V0.4.4 streaming runs always have a positive max_steps, so smoke/full
+    # completion is explicit. Keep the old fallback for earlier run.json files.
+    if "smoke_test" in metadata:
+        return not bool(metadata.get("smoke_test"))
     max_steps = metadata.get("preset_values", {}).get("max_steps", -1)
     try:
         return int(max_steps) < 0
@@ -141,11 +146,11 @@ def run_one_click(
             nonlocal memory_paused
             monitor.update("corpus", payload)
             state = payload.get("parse_state")
-            if state == "waiting_for_memory" and not memory_paused:
+            if state in {"waiting_for_memory", "waiting_for_disk"} and not memory_paused:
                 memory_paused = True
                 monitor.update_phase(
-                    "waiting_for_memory",
-                    "Waiting for memory to recover",
+                    state,
+                    "Waiting for RAM" if state == "waiting_for_memory" else "Waiting for disk space",
                     status="paused",
                 )
             elif (
@@ -180,8 +185,7 @@ def run_one_click(
         )
 
     registry = Registry(cfg.registry_path)
-    active_hashes = registry.active_ready_hashes(cfg.parser_version)
-    if not active_hashes:
+    if registry.active_ready_count(cfg.parser_version) <= 0:
         raise ValueError(
             "No trainable canonical corpus is available. Check corpus_dir and parser failures."
         )
@@ -193,7 +197,6 @@ def run_one_click(
         registry,
         latest_full,
         parser_version=cfg.parser_version,
-        active_hashes=active_hashes,
     )
 
     if snapshot_reused:

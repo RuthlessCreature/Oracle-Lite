@@ -54,8 +54,11 @@ def test_low_memory_text_fallback_streams_sidecar(tmp_path: Path):
         asset_dir=assets,
         canonical_path=canonical,
         content_hash="a" * 64,
-        parser_version="v3-memory-safe",
+        parser_version="v4-resource-admission",
         memory_level=2,
+        output_dir=tmp_path,
+        disk_reserve_bytes=0,
+        disk_resume_bytes=0,
     )
 
     assert result["low_memory_mode"] is True
