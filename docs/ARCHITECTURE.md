@@ -1,4 +1,4 @@
-# Oracle-Lite V0.2 Architecture
+# Oracle-Lite V0.4 Architecture
 
 ## 1. Hard requirements
 
@@ -167,3 +167,41 @@ Its output may enrich metadata, but it cannot silently replace source truth used
 - image-only samples without reliable text are not fabricated into supervised examples;
 - failed training runs retain checkpoints;
 - every completed run records base model ID, snapshot ID and preset values.
+
+
+## 13. Local Training Console
+
+V0.4 adds an observability layer that is part of the training process rather than a separate service.
+
+```text
+oracle-lite run
+   |
+   +--> TrainingMonitor
+   |       +--> pipeline stages
+   |       +--> Trainer callback
+   |       +--> application logs
+   |       +--> system sampler
+   |
+   +--> localhost HTTP server
+   |       +--> /
+   |       +--> /api/state
+   |       +--> /health
+   |
+   +--> default browser
+```
+
+The monitor is thread-safe and receives state from both the one-click pipeline and the Hugging Face Trainer callback.
+
+System telemetry is sampled independently from the training thread. GPU metrics use NVML when available. Missing or broken GPU telemetry is non-fatal.
+
+The dashboard prefers `127.0.0.1:7860` and automatically selects another local port if that port is unavailable. It is never bound to a public interface by default.
+
+The user configuration remains exactly three fields; dashboard host, port and sampling cadence are internal defaults.
+
+Persistent observability artifacts are written under:
+
+```text
+output_dir/logs/
+├── training-console-<session>.jsonl
+└── training-console-<session>-final.json
+```
