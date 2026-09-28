@@ -668,6 +668,7 @@ def run_domain_training(
                     "dataset": dataset_meta,
                     "preset": "rtx4080_16gb_qwen35_multimodal_v2_no_kill",
                     "preset_values": cfg,
+                    "smoke_test": max_steps is not None,
                     "streaming_dataset": True,
                     "vision_base_frozen": True,
                     "resource_policy": policy.as_dict(),
