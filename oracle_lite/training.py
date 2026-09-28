@@ -492,7 +492,7 @@ def run_domain_training(
                     quantization_config=quant,
                     device_map="auto",
                     low_cpu_mem_usage=True,
-                    max_memory={0: "13GiB", "cpu": "12GiB"},
+                    max_memory={0: "12GiB", "cpu": "12GiB"},
                     torch_dtype=torch.bfloat16,
                     trust_remote_code=cfg["trust_remote_code"],
                 )
