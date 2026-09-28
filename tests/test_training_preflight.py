@@ -83,8 +83,19 @@ def test_base_multimodal_prompt_does_not_require_chat_template():
     assert ".apply_chat_template(" not in training
 
 
-def test_package_versions_match_054():
+def test_rtx4080_preset_keeps_explicit_vram_headroom():
+    text = Path("oracle_lite/training.py").read_text(encoding="utf-8")
+    assert '"text_max_length": 1024' in text
+    assert '"vision_max_pixels": 196_608' in text
+    assert 'max_memory={0: "9GiB", "cpu": "20GiB"}' in text
+    assert "control.should_save = True" in text
+    assert "control.should_training_stop = True" in text
+    assert "torch.cuda.empty_cache()" in text
+    assert "post-step VRAM headroom below safety reserve" in text
+
+
+def test_package_versions_match_055():
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
     init = Path("oracle_lite/__init__.py").read_text(encoding="utf-8")
-    assert 'version = "0.5.4"' in pyproject
-    assert '__version__ = "0.5.4"' in init
+    assert 'version = "0.5.5"' in pyproject
+    assert '__version__ = "0.5.5"' in init
