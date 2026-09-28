@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import gc
 import json
+import math
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,7 +11,14 @@ from pathlib import Path
 from .config import AppConfig
 from .db import Registry
 from .models import DEFAULT_BASE_MODEL_ID, ensure_base_model
-from .memory import GIB, MemoryPolicy, wait_for_safe_memory
+from .resources import (
+    GIB,
+    HostResourcePolicy,
+    current_gpu_memory,
+    wait_for_disk,
+    wait_for_ram,
+    wait_for_vram,
+)
 
 
 RTX4080_16GB_MULTIMODAL_PRESET = {
@@ -22,7 +32,8 @@ RTX4080_16GB_MULTIMODAL_PRESET = {
     "lora_dropout": 0.05,
     "target_modules": "all-linear",
     "text_max_length": 2048,
-    "visual_text_max_chars": 6000,
+    "visual_text_max_chars": 4000,
+    "vision_max_pixels": 786_432,
     "micro_batch_size": 1,
     "gradient_accumulation_steps": 32,
     "gradient_checkpointing": True,
@@ -33,7 +44,7 @@ RTX4080_16GB_MULTIMODAL_PRESET = {
     "optim": "paged_adamw_8bit",
     "logging_steps": 10,
     "save_steps": 50,
-    "save_total_limit": 3,
+    "save_total_limit": 2,
     "dataloader_num_workers": 0,
     "seed": 42,
     "trust_remote_code": False,
@@ -45,7 +56,7 @@ def _now() -> str:
 
 
 class MultimodalDomainCollator:
-    """Batch-size-1 collator mixing text CLM and source-grounded VLM supervision."""
+    """Batch-size-1 collator mixing text CLM and grounded VLM supervision."""
 
     def __init__(self, processor, cfg: dict):
         self.processor = processor
@@ -78,17 +89,18 @@ class MultimodalDomainCollator:
         if not target_text:
             raise ValueError("Visual record has no source-grounded target text")
 
+        # Dataset construction enforces one image per multimodal record.
+        image_path = str(Path(item["images"][0]).resolve())
         user_content = [
-            {"type": "image", "path": str(Path(image_path).resolve())}
-            for image_path in item["images"]
+            {"type": "image", "path": image_path},
+            {
+                "type": "text",
+                "text": (
+                    "读取这些原始资料图像，理解其中可见的文字、表格、图示与版面结构。"
+                    "仅依据图像本身，不补充外部事实。"
+                ),
+            },
         ]
-        user_content.append({
-            "type": "text",
-            "text": (
-                "读取这些原始资料图像，理解其中可见的文字、表格、图示与版面结构。"
-                "仅依据图像本身，不补充外部事实。"
-            ),
-        })
 
         prompt_messages = [{"role": "user", "content": user_content}]
         full_messages = [
@@ -128,13 +140,7 @@ def run_domain_training(
     max_steps: int | None = None,
     monitor=None,
 ) -> str:
-    """Train Qwen3.5-9B-Base on mixed text + image/text domain records.
-
-    The default model is downloaded automatically into output/models.
-    Vision encoder base parameters are frozen for RTX 4080 memory safety, while
-    images still flow through the native vision tower and language-side LoRA learns
-    from the visual embeddings.
-    """
+    """Train with streaming data and RAM/disk/VRAM admission control."""
     try:
         import torch
         from datasets import load_dataset
@@ -153,43 +159,124 @@ def run_domain_training(
             "Training dependencies are missing. Install with: pip install -e '.[train]'"
         ) from exc
 
-    memory_policy = MemoryPolicy.auto()
+    policy = HostResourcePolicy.auto(app_cfg.output_dir)
+    cfg = dict(RTX4080_16GB_MULTIMODAL_PRESET)
 
-    def _memory_gate(resume_phase: str, resume_label: str) -> None:
-        import psutil
-
-        if int(psutil.virtual_memory().available) >= memory_policy.reserve_system_bytes:
+    def _wait_state(kind: str, state: dict, resume_phase: str, resume_label: str) -> None:
+        if monitor is None:
             return
+        label = {
+            "ram": "Waiting for RAM",
+            "disk": "Waiting for disk space",
+            "vram": "Waiting for GPU memory",
+        }.get(kind, "Waiting for resources")
+        monitor.update_phase(f"waiting_for_{kind}", label, status="paused")
+        system_update = {"resource_wait": kind}
+        if kind == "ram":
+            system_update.update({
+                "ram_available_gb": state.get("available_gb"),
+                "memory_reserve_gb": state.get("reserve_gb"),
+                "memory_target_gb": state.get("target_gb"),
+            })
+        elif kind == "disk":
+            system_update.update({
+                "disk_free_gb": state.get("free_gb"),
+                "disk_reserve_gb": state.get("reserve_gb"),
+                "disk_target_gb": state.get("target_gb"),
+            })
+        elif kind == "vram":
+            system_update.update({
+                "gpu_free_gb": state.get("free_gb"),
+                "gpu_required_free_gb": state.get("required_free_gb"),
+            })
+        monitor.update("system", system_update)
 
-        if monitor is not None:
-            monitor.update_phase(
-                "waiting_for_memory",
-                "Waiting for memory to recover",
-                status="paused",
-            )
-            monitor.log(
-                "WARNING",
-                "Host RAM pressure detected; pausing at a safe training boundary.",
-            )
+    def _ram_gate(
+        resume_phase: str,
+        resume_label: str,
+        *,
+        extra_required_bytes: int = 0,
+    ) -> None:
+        waited = False
 
         def on_wait(state: dict) -> None:
-            if monitor is not None:
-                monitor.update("system", {
-                    "ram_available_gb": state["available_gb"],
-                    "memory_reserve_gb": state["reserve_gb"],
-                    "memory_resume_gb": state["resume_gb"],
-                })
+            nonlocal waited
+            if not state.get("safe"):
+                waited = True
+                _wait_state("ram", state, resume_phase, resume_label)
 
-        wait_for_safe_memory(
-            memory_policy,
+        wait_for_ram(
+            policy,
+            extra_required_bytes=extra_required_bytes,
             on_wait=on_wait,
             poll_seconds=1.0,
             stable_samples=3,
         )
-
-        if monitor is not None:
+        if waited and monitor is not None:
             monitor.update_phase(resume_phase, resume_label, status="running")
-            monitor.log("INFO", "Host RAM recovered; resuming.")
+            monitor.log("INFO", "RAM recovered; resuming.")
+
+    def _disk_gate(
+        resume_phase: str,
+        resume_label: str,
+        *,
+        required_bytes: int,
+    ) -> None:
+        waited = False
+
+        def on_wait(state: dict) -> None:
+            nonlocal waited
+            if not state.get("safe"):
+                waited = True
+                _wait_state("disk", state, resume_phase, resume_label)
+
+        wait_for_disk(
+            app_cfg.output_dir,
+            policy,
+            required_bytes=required_bytes,
+            on_wait=on_wait,
+            poll_seconds=2.0,
+            stable_samples=2,
+        )
+        if waited and monitor is not None:
+            monitor.update_phase(resume_phase, resume_label, status="running")
+            monitor.log("INFO", "Disk headroom recovered; resuming.")
+
+    def _vram_gate(
+        resume_phase: str,
+        resume_label: str,
+        *,
+        required_free_bytes: int,
+    ) -> None:
+        waited = False
+
+        def on_wait(state: dict) -> None:
+            nonlocal waited
+            if not state.get("safe"):
+                waited = True
+                _wait_state("vram", state, resume_phase, resume_label)
+
+        wait_for_vram(
+            required_free_bytes=required_free_bytes,
+            on_wait=on_wait,
+            poll_seconds=2.0,
+            stable_samples=2,
+        )
+        if waited and monitor is not None:
+            monitor.update_phase(resume_phase, resume_label, status="running")
+            monitor.log("INFO", "GPU memory recovered; resuming.")
+
+    def _set_vision_budget(processor, pixels: int) -> None:
+        image_processor = getattr(processor, "image_processor", None)
+        if image_processor is None:
+            return
+        try:
+            image_processor.size = {
+                "shortest_edge": 65_536,
+                "longest_edge": int(pixels),
+            }
+        except Exception:
+            pass
 
     class _MonitorCallback(TrainerCallback):
         def __init__(self, runtime_monitor):
@@ -200,14 +287,12 @@ def run_domain_training(
             if self.runtime_monitor is None:
                 return
             if self.started is None:
-                self.started = __import__("time").monotonic()
+                self.started = time.monotonic()
             total = int(getattr(state, "max_steps", 0) or 0)
             step = int(getattr(state, "global_step", 0) or 0)
             progress = (step / total * 100.0) if total > 0 else 0.0
-            elapsed = max(0.0, __import__("time").monotonic() - self.started)
-            eta = None
-            if step > 0 and total > step:
-                eta = elapsed / step * (total - step)
+            elapsed = max(0.0, time.monotonic() - self.started)
+            eta = elapsed / step * (total - step) if step > 0 and total > step else None
             payload = {
                 "step": step,
                 "total_steps": total,
@@ -220,14 +305,28 @@ def run_domain_training(
             self.runtime_monitor.update_training(**payload)
 
         def on_train_begin(self, args, state, control, **kwargs):
-            self.started = __import__("time").monotonic()
+            self.started = time.monotonic()
             if self.runtime_monitor is not None:
                 self.runtime_monitor.update_phase("training", "Training model")
             self._push(state)
 
+        def on_step_begin(self, args, state, control, **kwargs):
+            # Admission happens before the next forward/backward allocation.
+            _ram_gate("training", "Training model")
+            _disk_gate(
+                "training",
+                "Training model",
+                required_bytes=policy.training_write_budget_bytes,
+            )
+            _vram_gate(
+                "training",
+                "Training model",
+                required_free_bytes=policy.gpu_step_reserve_bytes,
+            )
+            self._push(state)
+
         def on_step_end(self, args, state, control, **kwargs):
             self._push(state)
-            _memory_gate("training", "Training model")
 
         def on_log(self, args, state, control, logs=None, **kwargs):
             logs = logs or {}
@@ -242,7 +341,10 @@ def run_domain_training(
                     extra[target] = logs[source]
             self._push(state, **extra)
             if self.runtime_monitor is not None and logs:
-                compact = {k: v for k, v in logs.items() if isinstance(v, (int, float, str))}
+                compact = {
+                    k: v for k, v in logs.items()
+                    if isinstance(v, (int, float, str))
+                }
                 self.runtime_monitor.log("INFO", "Trainer log", **compact)
 
         def on_save(self, args, state, control, **kwargs):
@@ -259,24 +361,28 @@ def run_domain_training(
         def on_train_end(self, args, state, control, **kwargs):
             self._push(state, progress_percent=100.0, eta_seconds=0)
 
-    cfg = dict(RTX4080_16GB_MULTIMODAL_PRESET)
-    if max_steps is not None:
-        cfg["max_steps"] = int(max_steps)
-
     if monitor is not None:
         monitor.update("system", {
-            "memory_reserve_gb": round(memory_policy.reserve_system_bytes / GIB, 2),
-            "memory_resume_gb": round(memory_policy.resume_system_bytes / GIB, 2),
+            **policy.as_dict(),
+            "resource_policy": "admission-control-no-kill",
         })
         monitor.update("model", {"model_id": DEFAULT_BASE_MODEL_ID})
         monitor.update_phase("model_download", "Checking / downloading Qwen3.5-9B-Base")
-    model_path = ensure_base_model(app_cfg)
+
+    _disk_gate(
+        "model_download",
+        "Checking / downloading Qwen3.5-9B-Base",
+        required_bytes=policy.model_download_budget_bytes,
+    )
+    model_path = ensure_base_model(app_cfg, monitor=monitor)
+
     if monitor is not None:
         monitor.update("model", {
             "model_id": DEFAULT_BASE_MODEL_ID,
             "local_path": str(model_path),
         })
         monitor.log("INFO", "Base model ready", path=str(model_path))
+
     dataset_dir = (app_cfg.datasets_dir / snapshot_id / "domain").resolve()
     dataset_meta_path = dataset_dir / "dataset.json"
     if not dataset_meta_path.exists():
@@ -290,30 +396,73 @@ def run_domain_training(
     if not shard_paths:
         raise FileNotFoundError(f"No domain shards found under {dataset_dir}")
 
+    records = int(dataset_meta.get("records", 0))
+    if records <= 0:
+        raise ValueError("Domain dataset contains no trainable records")
+
+    # Streaming datasets do not implement __len__, so Trainer requires max_steps.
+    computed_steps = max(
+        1,
+        math.ceil(
+            records
+            * float(cfg["num_train_epochs"])
+            / (
+                int(cfg["micro_batch_size"])
+                * int(cfg["gradient_accumulation_steps"])
+            )
+        ),
+    )
+    cfg["max_steps"] = int(max_steps) if max_steps is not None else computed_steps
+
     output_dir = (
         app_cfg.training_dir / snapshot_id / "qwen3.5-9b-base-multimodal-rtx4080"
     ).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if monitor is not None:
-        monitor.update_phase("training_prepare", "Preparing training run")
+        monitor.update_phase("training_prepare", "Preparing streaming training run")
+
     registry = Registry(app_cfg.registry_path)
-    run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+    run_id = (
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
+        f"{uuid.uuid4().hex[:8]}"
+    )
     with registry.connect() as conn:
         conn.execute(
-            """INSERT INTO training_runs(run_id,snapshot_id,kind,status,config_path,output_dir,started_at)
-               VALUES(?,?,'multimodal-domain','running',NULL,?,?)""",
+            """INSERT INTO training_runs(
+                   run_id,snapshot_id,kind,status,config_path,output_dir,started_at
+               ) VALUES(?,?,'multimodal-domain','running',NULL,?,?)""",
             (run_id, snapshot_id, str(output_dir), _now()),
         )
 
     try:
         if monitor is not None:
-            monitor.update_training(run_id=run_id)
+            monitor.update_training(run_id=run_id, total_steps=cfg["max_steps"])
+
         if not torch.cuda.is_available():
-            raise RuntimeError("CUDA GPU not available. Local multimodal training requires NVIDIA CUDA.")
+            raise RuntimeError(
+                "CUDA GPU not available. Local multimodal training requires NVIDIA CUDA."
+            )
 
         if cfg["allow_tf32"]:
             torch.backends.cuda.matmul.allow_tf32 = True
+
+        _ram_gate(
+            "model_load",
+            "Loading processor and 4-bit multimodal model",
+            extra_required_bytes=10 * GIB,
+        )
+        gpu_state = current_gpu_memory(0)
+        if gpu_state is not None:
+            pre_model_free = max(
+                8 * GIB,
+                int(gpu_state["total_bytes"]) - int(1.5 * GIB),
+            )
+            _vram_gate(
+                "model_load",
+                "Loading processor and 4-bit multimodal model",
+                required_free_bytes=pre_model_free,
+            )
 
         quant = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -322,27 +471,71 @@ def run_domain_training(
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
-        _memory_gate("model_load", "Loading processor and 4-bit multimodal model")
         if monitor is not None:
-            monitor.update_phase("model_load", "Loading processor and 4-bit multimodal model")
+            monitor.update_phase(
+                "model_load",
+                "Loading processor and 4-bit multimodal model",
+            )
+
         processor = AutoProcessor.from_pretrained(
             str(model_path),
             trust_remote_code=cfg["trust_remote_code"],
         )
         if processor.tokenizer.pad_token_id is None:
             processor.tokenizer.pad_token = processor.tokenizer.eos_token
+        _set_vision_budget(processor, cfg["vision_max_pixels"])
 
-        model = AutoModelForMultimodalLM.from_pretrained(
-            str(model_path),
-            quantization_config=quant,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-            max_memory={0: "15GiB", "cpu": "8GiB"},
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=cfg["trust_remote_code"],
-        )
+        while True:
+            try:
+                model = AutoModelForMultimodalLM.from_pretrained(
+                    str(model_path),
+                    quantization_config=quant,
+                    device_map="auto",
+                    low_cpu_mem_usage=True,
+                    max_memory={0: "13GiB", "cpu": "12GiB"},
+                    torch_dtype=torch.bfloat16,
+                    trust_remote_code=cfg["trust_remote_code"],
+                )
+                break
+            except torch.cuda.OutOfMemoryError:
+                gc.collect()
+                torch.cuda.empty_cache()
+                if monitor is not None:
+                    monitor.update_phase(
+                        "waiting_for_vram",
+                        "Waiting for GPU memory before model load",
+                        status="paused",
+                    )
+                    monitor.log(
+                        "WARNING",
+                        "CUDA OOM during model load; waiting and retrying without exiting.",
+                    )
+                gpu_state = current_gpu_memory(0)
+                required = (
+                    max(8 * GIB, int(gpu_state["total_bytes"]) - int(1.5 * GIB))
+                    if gpu_state is not None
+                    else 8 * GIB
+                )
+                _vram_gate(
+                    "model_load",
+                    "Loading processor and 4-bit multimodal model",
+                    required_free_bytes=required,
+                )
+            except MemoryError:
+                gc.collect()
+                if monitor is not None:
+                    monitor.update_phase(
+                        "waiting_for_ram",
+                        "Waiting for RAM before model load",
+                        status="paused",
+                    )
+                _ram_gate(
+                    "model_load",
+                    "Loading processor and 4-bit multimodal model",
+                    extra_required_bytes=10 * GIB,
+                )
+
         model.config.use_cache = False
-
         model = prepare_model_for_kbit_training(
             model,
             use_gradient_checkpointing=cfg["gradient_checkpointing"],
@@ -359,31 +552,29 @@ def run_domain_training(
             ),
         )
 
-        # 4080 policy: keep native vision tower fixed. Multimodal samples still
-        # traverse it; trainable LoRA lives outside visual/vision modules.
         for name, parameter in model.named_parameters():
             lowered = name.lower()
             if "visual" in lowered or "vision" in lowered:
                 parameter.requires_grad = False
 
-        _memory_gate("dataset_load", "Loading training dataset")
         if monitor is not None:
-            monitor.update_phase("dataset_load", "Loading training dataset")
-        raw_ds = load_dataset("json", data_files=shard_paths, split="train")
-        train_ds = raw_ds.filter(
-            lambda row: bool((row.get("text") or "").strip()),
-            desc="Dropping unlabeled visual-only records",
-        )
-        if len(train_ds) == 0:
-            raise ValueError("No trainable records remain after source-grounding checks")
+            monitor.update_phase("dataset_stream", "Opening streaming JSONL dataset")
+
+        # No Arrow materialization/cache: local JSONL is iterated record-by-record.
+        train_ds = load_dataset(
+            "json",
+            data_files=shard_paths,
+            split="train",
+            streaming=True,
+        ).filter(lambda row: bool((row.get("text") or "").strip()))
 
         args = TrainingArguments(
             output_dir=str(output_dir),
             per_device_train_batch_size=cfg["micro_batch_size"],
             gradient_accumulation_steps=cfg["gradient_accumulation_steps"],
             learning_rate=cfg["learning_rate"],
-            num_train_epochs=cfg["num_train_epochs"],
-            max_steps=int(cfg.get("max_steps", -1)),
+            num_train_epochs=1.0,
+            max_steps=int(cfg["max_steps"]),
             warmup_ratio=cfg["warmup_ratio"],
             weight_decay=cfg["weight_decay"],
             logging_steps=cfg["logging_steps"],
@@ -399,27 +590,69 @@ def run_domain_training(
             seed=cfg["seed"],
         )
 
-        callbacks = [_MonitorCallback(monitor)] if monitor is not None else None
-        trainer = Trainer(
-            model=model,
-            args=args,
-            train_dataset=train_ds,
-            data_collator=MultimodalDomainCollator(processor, cfg),
-            callbacks=callbacks,
-        )
-
-        checkpoint = get_last_checkpoint(str(output_dir))
-        if monitor is not None:
-            monitor.update_training(
-                checkpoint=checkpoint,
-                run_id=run_id,
+        def make_trainer():
+            callbacks = [_MonitorCallback(monitor)] if monitor is not None else None
+            return Trainer(
+                model=model,
+                args=args,
+                train_dataset=train_ds,
+                data_collator=MultimodalDomainCollator(processor, cfg),
+                callbacks=callbacks,
             )
-            if checkpoint:
-                monitor.log("INFO", "Resuming from checkpoint", checkpoint=checkpoint)
-            else:
-                monitor.log("INFO", "Starting training from base model")
-            monitor.update_phase("training", "Training model")
-        trainer.train(resume_from_checkpoint=checkpoint)
+
+        oom_level = 0
+        oom_pixel_budgets = [786_432, 524_288, 393_216, 262_144]
+        oom_text_lengths = [2048, 1536, 1024, 768]
+        oom_visual_chars = [4000, 3000, 2000, 1200]
+
+        while True:
+            trainer = make_trainer()
+            checkpoint = get_last_checkpoint(str(output_dir))
+            if monitor is not None:
+                monitor.update_training(checkpoint=checkpoint, run_id=run_id)
+                monitor.update_phase("training", "Training model")
+            try:
+                trainer.train(resume_from_checkpoint=checkpoint)
+                break
+            except torch.cuda.OutOfMemoryError:
+                try:
+                    model.zero_grad(set_to_none=True)
+                except Exception:
+                    pass
+                gc.collect()
+                torch.cuda.empty_cache()
+
+                oom_level = min(oom_level + 1, len(oom_pixel_budgets) - 1)
+                cfg["vision_max_pixels"] = oom_pixel_budgets[oom_level]
+                cfg["text_max_length"] = oom_text_lengths[oom_level]
+                cfg["visual_text_max_chars"] = oom_visual_chars[oom_level]
+                _set_vision_budget(processor, cfg["vision_max_pixels"])
+
+                if monitor is not None:
+                    monitor.update_phase(
+                        "waiting_for_vram",
+                        "CUDA OOM: lowering batch footprint and waiting",
+                        status="paused",
+                    )
+                    monitor.log(
+                        "WARNING",
+                        "CUDA OOM caught; no process exit. Lowering visual/text budget and retrying.",
+                        oom_level=oom_level,
+                        vision_max_pixels=cfg["vision_max_pixels"],
+                        text_max_length=cfg["text_max_length"],
+                    )
+                _vram_gate(
+                    "training",
+                    "Training model",
+                    required_free_bytes=policy.gpu_step_reserve_bytes,
+                )
+                time.sleep(1.0)
+
+        _disk_gate(
+            "saving",
+            "Saving final adapter and processor",
+            required_bytes=policy.training_write_budget_bytes,
+        )
         if monitor is not None:
             monitor.update_phase("saving", "Saving final adapter and processor")
         trainer.save_model(str(output_dir / "adapter-final"))
@@ -433,9 +666,11 @@ def run_domain_training(
                     "base_model_id": DEFAULT_BASE_MODEL_ID,
                     "base_model_path": str(model_path),
                     "dataset": dataset_meta,
-                    "preset": "rtx4080_16gb_qwen35_multimodal_v1",
+                    "preset": "rtx4080_16gb_qwen35_multimodal_v2_no_kill",
                     "preset_values": cfg,
+                    "streaming_dataset": True,
                     "vision_base_frozen": True,
+                    "resource_policy": policy.as_dict(),
                     "completed_at": _now(),
                 },
                 ensure_ascii=False,
@@ -450,7 +685,11 @@ def run_domain_training(
                 (_now(), run_id),
             )
         if monitor is not None:
-            monitor.update_training(progress_percent=100.0, eta_seconds=0, run_id=run_id)
+            monitor.update_training(
+                progress_percent=100.0,
+                eta_seconds=0,
+                run_id=run_id,
+            )
             monitor.log("INFO", "Training run completed", run_id=run_id)
         return run_id
 
