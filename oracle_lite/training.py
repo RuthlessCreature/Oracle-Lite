@@ -1,35 +1,65 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
 
-import yaml
-
 from .config import AppConfig
 from .db import Registry
+
+
+RTX4080_16GB_CPT_PRESET = {
+    "load_in_4bit": True,
+    "bnb_4bit_quant_type": "nf4",
+    "bnb_4bit_use_double_quant": True,
+    "compute_dtype": "bfloat16",
+    "allow_tf32": True,
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "target_modules": "all-linear",
+    "max_seq_length": 2048,
+    "micro_batch_size": 1,
+    "gradient_accumulation_steps": 16,
+    "gradient_checkpointing": True,
+    "learning_rate": 1e-4,
+    "num_train_epochs": 1.0,
+    "warmup_ratio": 0.03,
+    "weight_decay": 0.0,
+    "optim": "paged_adamw_8bit",
+    "logging_steps": 10,
+    "save_steps": 100,
+    "save_total_limit": 3,
+    "dataloader_num_workers": 0,
+    "seed": 42,
+    "trust_remote_code": False,
+}
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _load_training_config(path: str | Path) -> dict:
-    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
-    required = {"base_model", "dataset_dir", "output_dir"}
-    missing = sorted(required - raw.keys())
-    if missing:
-        raise ValueError(f"Missing training config keys: {', '.join(missing)}")
-    return raw
+def _slug(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-")
+    return cleaned[-80:] or "model"
 
 
-def run_cpt_training(app_cfg: AppConfig, training_config_path: str | Path) -> str:
-    """Run local QLoRA continued pretraining.
+def run_cpt_training(
+    app_cfg: AppConfig,
+    *,
+    snapshot_id: str,
+    base_model: str | Path,
+    max_steps: int | None = None,
+) -> str:
+    """Run local 4-bit QLoRA continued pretraining using RTX 4080 defaults.
 
-    Heavy ML imports are intentionally lazy so scan/ingest/snapshot commands work
-    without CUDA or training dependencies installed.
+    User configuration remains limited to MiniMax key, corpus path and output
+    path. Training knobs live in this built-in preset; only the local base-model
+    path and target snapshot are selected at run time.
     """
     try:
         import torch
@@ -49,83 +79,98 @@ def run_cpt_training(app_cfg: AppConfig, training_config_path: str | Path) -> st
             "Training dependencies are missing. Install with: pip install -e '.[train]'"
         ) from exc
 
-    cfg = _load_training_config(training_config_path)
-    dataset_dir = Path(cfg["dataset_dir"]).expanduser().resolve()
-    output_dir = Path(cfg["output_dir"]).expanduser().resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    cfg = dict(RTX4080_16GB_CPT_PRESET)
+    if max_steps is not None:
+        cfg["max_steps"] = int(max_steps)
 
+    base_model = Path(base_model).expanduser().resolve()
+    if not base_model.exists():
+        raise FileNotFoundError(f"Base model not found: {base_model}")
+
+    dataset_dir = (app_cfg.datasets_dir / snapshot_id / "cpt").resolve()
     dataset_meta_path = dataset_dir / "dataset.json"
     if not dataset_meta_path.exists():
-        raise FileNotFoundError(f"Missing dataset manifest: {dataset_meta_path}")
+        raise FileNotFoundError(
+            f"CPT dataset not built for snapshot {snapshot_id}. "
+            f"Run: oracle-lite build-cpt {snapshot_id}"
+        )
+
     dataset_meta = json.loads(dataset_meta_path.read_text(encoding="utf-8"))
-    snapshot_id = dataset_meta["snapshot_id"]
+    if dataset_meta.get("snapshot_id") != snapshot_id:
+        raise ValueError("Dataset manifest snapshot_id does not match requested snapshot")
 
     shard_paths = sorted(str(p) for p in dataset_dir.glob("part-*.jsonl"))
     if not shard_paths:
         raise FileNotFoundError(f"No CPT shards found under {dataset_dir}")
+
+    output_dir = (
+        app_cfg.training_dir
+        / snapshot_id
+        / f"{_slug(base_model.name)}-rtx4080-qlora"
+    ).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     registry = Registry(app_cfg.registry_path)
     run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
     with registry.connect() as conn:
         conn.execute(
             """INSERT INTO training_runs(run_id,snapshot_id,kind,status,config_path,output_dir,started_at)
-               VALUES(?,?,'cpt','running',?,?,?)""",
-            (run_id, snapshot_id, str(Path(training_config_path).resolve()), str(output_dir), _now()),
+               VALUES(?,?,'cpt','running',NULL,?,?)""",
+            (run_id, snapshot_id, str(output_dir), _now()),
         )
 
     try:
         if not torch.cuda.is_available():
-            raise RuntimeError("CUDA GPU not available. Oracle-Lite V0.1 CPT path requires NVIDIA CUDA.")
+            raise RuntimeError("CUDA GPU not available. Local CPT requires NVIDIA CUDA.")
 
-        if cfg.get("allow_tf32", True):
+        if cfg["allow_tf32"]:
             torch.backends.cuda.matmul.allow_tf32 = True
 
-        compute_dtype_name = str(cfg.get("compute_dtype", "bfloat16")).lower()
-        compute_dtype = torch.bfloat16 if compute_dtype_name in {"bf16", "bfloat16"} else torch.float16
+        compute_dtype = torch.bfloat16
 
         quant = BitsAndBytesConfig(
-            load_in_4bit=bool(cfg.get("load_in_4bit", True)),
-            bnb_4bit_quant_type=str(cfg.get("bnb_4bit_quant_type", "nf4")),
-            bnb_4bit_use_double_quant=bool(cfg.get("bnb_4bit_use_double_quant", True)),
+            load_in_4bit=cfg["load_in_4bit"],
+            bnb_4bit_quant_type=cfg["bnb_4bit_quant_type"],
+            bnb_4bit_use_double_quant=cfg["bnb_4bit_use_double_quant"],
             bnb_4bit_compute_dtype=compute_dtype,
         )
 
         tokenizer = AutoTokenizer.from_pretrained(
-            cfg["base_model"],
+            str(base_model),
             use_fast=True,
-            trust_remote_code=bool(cfg.get("trust_remote_code", False)),
+            trust_remote_code=cfg["trust_remote_code"],
         )
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token = tokenizer.eos_token
 
         model = AutoModelForCausalLM.from_pretrained(
-            cfg["base_model"],
+            str(base_model),
             quantization_config=quant,
             device_map="auto",
             torch_dtype=compute_dtype,
-            trust_remote_code=bool(cfg.get("trust_remote_code", False)),
+            trust_remote_code=cfg["trust_remote_code"],
         )
         model.config.use_cache = False
 
-        gradient_checkpointing = bool(cfg.get("gradient_checkpointing", True))
         model = prepare_model_for_kbit_training(
             model,
-            use_gradient_checkpointing=gradient_checkpointing,
+            use_gradient_checkpointing=cfg["gradient_checkpointing"],
         )
-
-        lora = LoraConfig(
-            r=int(cfg.get("lora_r", 16)),
-            lora_alpha=int(cfg.get("lora_alpha", 32)),
-            lora_dropout=float(cfg.get("lora_dropout", 0.05)),
-            bias="none",
-            target_modules=cfg.get("target_modules", "all-linear"),
-            task_type="CAUSAL_LM",
+        model = get_peft_model(
+            model,
+            LoraConfig(
+                r=cfg["lora_r"],
+                lora_alpha=cfg["lora_alpha"],
+                lora_dropout=cfg["lora_dropout"],
+                bias="none",
+                target_modules=cfg["target_modules"],
+                task_type="CAUSAL_LM",
+            ),
         )
-        model = get_peft_model(model, lora)
 
         raw_ds = load_dataset("json", data_files=shard_paths, split="train")
         eos = tokenizer.eos_token or ""
-        block_size = int(cfg.get("max_seq_length", 2048))
+        block_size = cfg["max_seq_length"]
 
         def tokenize_batch(batch):
             return tokenizer(
@@ -149,7 +194,10 @@ def run_cpt_training(app_cfg: AppConfig, training_config_path: str | Path) -> st
             total_length = len(concatenated["input_ids"])
             total_length = (total_length // block_size) * block_size
             result = {
-                key: [values[i : i + block_size] for i in range(0, total_length, block_size)]
+                key: [
+                    values[i : i + block_size]
+                    for i in range(0, total_length, block_size)
+                ]
                 for key, values in concatenated.items()
             }
             result["labels"] = [ids.copy() for ids in result["input_ids"]]
@@ -160,27 +208,31 @@ def run_cpt_training(app_cfg: AppConfig, training_config_path: str | Path) -> st
             batched=True,
             desc=f"Packing into {block_size}-token blocks",
         )
+        if len(train_ds) == 0:
+            raise ValueError(
+                f"Dataset is smaller than one {block_size}-token training block."
+            )
 
         args = TrainingArguments(
             output_dir=str(output_dir),
-            per_device_train_batch_size=int(cfg.get("micro_batch_size", 1)),
-            gradient_accumulation_steps=int(cfg.get("gradient_accumulation_steps", 16)),
-            learning_rate=float(cfg.get("learning_rate", 1e-4)),
-            num_train_epochs=float(cfg.get("num_train_epochs", 1.0)),
+            per_device_train_batch_size=cfg["micro_batch_size"],
+            gradient_accumulation_steps=cfg["gradient_accumulation_steps"],
+            learning_rate=cfg["learning_rate"],
+            num_train_epochs=cfg["num_train_epochs"],
             max_steps=int(cfg.get("max_steps", -1)),
-            warmup_ratio=float(cfg.get("warmup_ratio", 0.03)),
-            weight_decay=float(cfg.get("weight_decay", 0.0)),
-            logging_steps=int(cfg.get("logging_steps", 10)),
-            save_steps=int(cfg.get("save_steps", 100)),
-            save_total_limit=int(cfg.get("save_total_limit", 3)),
-            bf16=compute_dtype is torch.bfloat16,
-            fp16=compute_dtype is torch.float16,
-            gradient_checkpointing=gradient_checkpointing,
-            optim=str(cfg.get("optim", "paged_adamw_8bit")),
+            warmup_ratio=cfg["warmup_ratio"],
+            weight_decay=cfg["weight_decay"],
+            logging_steps=cfg["logging_steps"],
+            save_steps=cfg["save_steps"],
+            save_total_limit=cfg["save_total_limit"],
+            bf16=True,
+            fp16=False,
+            gradient_checkpointing=cfg["gradient_checkpointing"],
+            optim=cfg["optim"],
             report_to=[],
             remove_unused_columns=False,
-            dataloader_num_workers=int(cfg.get("dataloader_num_workers", 0)),
-            seed=int(cfg.get("seed", 42)),
+            dataloader_num_workers=cfg["dataloader_num_workers"],
+            seed=cfg["seed"],
         )
 
         trainer = Trainer(
@@ -190,18 +242,26 @@ def run_cpt_training(app_cfg: AppConfig, training_config_path: str | Path) -> st
             data_collator=default_data_collator,
         )
 
-        resume = cfg.get("resume_from_checkpoint", "auto")
-        checkpoint = None
-        if resume == "auto":
-            checkpoint = get_last_checkpoint(str(output_dir))
-        elif isinstance(resume, str) and resume not in {"", "none", "false"}:
-            checkpoint = resume
-        elif resume is True:
-            checkpoint = True
-
+        checkpoint = get_last_checkpoint(str(output_dir))
         trainer.train(resume_from_checkpoint=checkpoint)
         trainer.save_model(str(output_dir / "adapter-final"))
         tokenizer.save_pretrained(str(output_dir / "adapter-final"))
+
+        (output_dir / "run.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "snapshot_id": snapshot_id,
+                    "base_model": str(base_model),
+                    "preset": "rtx4080_16gb_qlora_cpt_v1",
+                    "preset_values": cfg,
+                    "completed_at": _now(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
         with registry.connect() as conn:
             conn.execute(
