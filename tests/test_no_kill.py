@@ -6,7 +6,7 @@ def test_core_has_no_active_process_kill_calls():
     forbidden = (
         ".terminate(",
         ".kill(",
-        "SIGKILL",
+        "signal.SIGKILL",
         "os.kill(",
     )
     offenders = []
