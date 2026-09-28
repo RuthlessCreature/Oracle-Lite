@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.2 - 2026-09-28
+
+### Fixed
+- Corpus parsing now runs one source file per isolated worker process.
+- Parser-worker RSS and system available RAM are monitored continuously; unsafe workers are terminated before exhausting the workstation.
+- Canonical serialization no longer deep-copies the full document or constructs one giant JSON string.
+- Canonical segments are written to streamable JSONL sidecars and Dataset construction streams them line-by-line.
+- PDF parsing releases page/pixmap objects incrementally and avoids duplicate full-document text aggregation.
+- DOCX media extraction uses bounded streaming copy.
+- JSONL is read line-by-line; JSON/text outputs are chunked instead of building additional whole-document concatenations.
+- Visual assets are isolated by parser version so V3 rebuilding cannot invalidate old snapshots.
+
+### Hash/cache behavior
+- Existing SHA-256 values are preserved across this upgrade.
+- Unchanged files reuse registry hashes when path + size + mtime_ns match; the second scan performs zero content hashing.
+- Parser version is now `v3-memory-safe`, so existing content is reparsed once into the new Canonical layout, then reused on later runs.
+
+### Configuration
+The user config remains exactly three fields:
+- `minimax_api_key`
+- `corpus_dir`
+- `output_dir`
+
 ## 0.4.1 - 2026-09-28
 
 ### Fixed
