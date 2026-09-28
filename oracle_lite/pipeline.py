@@ -116,9 +116,18 @@ def run_one_click(
     from fragile adapter-chaining semantics. This is intentionally optimized for
     correctness and reproducibility rather than speed.
     """
+    scan_progress = None
     if monitor is not None:
         monitor.update_phase("scan", "Scanning corpus")
-    scan_stats = scan_corpus(cfg, verify_all=verify_all)
+
+        def scan_progress(payload: dict[str, Any]) -> None:
+            monitor.update("corpus", payload)
+
+    scan_stats = scan_corpus(
+        cfg,
+        verify_all=verify_all,
+        progress=scan_progress,
+    )
     if monitor is not None:
         monitor.update("corpus", scan_stats.as_dict())
         monitor.log("INFO", "Corpus scan completed", **scan_stats.as_dict())

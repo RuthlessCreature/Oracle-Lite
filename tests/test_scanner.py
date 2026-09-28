@@ -67,3 +67,28 @@ def test_rename_keeps_one_content_object(tmp_path: Path):
     assert stats.tombstoned == 1
     registry = Registry(cfg.registry_path)
     assert len(registry.list_active_unique_content()) == 1
+
+
+def test_scan_progress_reports_current_file_and_hash_bytes(tmp_path: Path):
+    cfg = make_cfg(tmp_path)
+    payload = b"x" * (2 * 1024 * 1024 + 123)
+    source = cfg.corpus_dir / "large.txt"
+    source.write_bytes(payload)
+
+    events = []
+    stats = scan_corpus(
+        cfg,
+        verify_all=True,
+        progress=lambda event: events.append(dict(event)),
+    )
+
+    assert stats.files_seen == 1
+    assert stats.hashed == 1
+    assert stats.bytes_hashed == len(payload)
+    file_events = [e for e in events if e.get("current_file") == str(source.resolve())]
+    assert file_events
+    hash_events = [e for e in file_events if e.get("hashing") is True]
+    assert hash_events
+    assert hash_events[-1]["current_file_hashed_bytes"] == len(payload)
+    assert hash_events[-1]["current_file_size"] == len(payload)
+    assert events[-1].get("complete") is True
