@@ -8,7 +8,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .config import load_config
-from .dataset import build_cpt_dataset
+from .dataset import build_domain_dataset
 from .db import Registry
 from .ingest import ingest_corpus
 from .models import DEFAULT_BASE_MODEL_ID, ensure_base_model
@@ -96,7 +96,7 @@ def build_domain(
     max_records_per_shard: int = typer.Option(2000),
 ):
     """Build mixed text + image/text domain-adaptation JSONL."""
-    result = build_cpt_dataset(
+    result = build_domain_dataset(
         load_config(config),
         snapshot_id=snapshot_id,
         max_records_per_shard=max_records_per_shard,
@@ -132,7 +132,7 @@ def prepare(
         history_replay_ratio=replay_ratio,
         seed=42,
     )
-    dataset = build_cpt_dataset(cfg, snapshot_id=snap.snapshot_id)
+    dataset = build_domain_dataset(cfg, snapshot_id=snap.snapshot_id)
 
     console.print_json(json.dumps({
         "scan": scan_stats.as_dict(),
