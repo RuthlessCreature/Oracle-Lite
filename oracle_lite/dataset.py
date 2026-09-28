@@ -84,22 +84,40 @@ def build_domain_dataset(
                     if not text and not images:
                         continue
 
-                    write_record({
-                        "mode": "multimodal" if images else "text",
-                        "text": text,
-                        "images": images,
-                        "content_hash": header["content_hash"],
-                        "source_path": member["source_path"],
-                        "segment_index": index,
-                        "segment_metadata": segment.metadata,
-                        "role": role,
-                    })
-                    emitted_segment = True
-                    characters += len(text)
                     if images:
-                        visual_records += 1
+                        # Hard memory bound: one visual asset per training record.
+                        # Multi-image pages/slides/documents are expanded into
+                        # independent source-grounded examples.
+                        for image_index, image_path in enumerate(images):
+                            metadata = dict(segment.metadata)
+                            metadata["image_index"] = image_index
+                            metadata["image_count"] = len(images)
+                            write_record({
+                                "mode": "multimodal",
+                                "text": text,
+                                "images": [image_path],
+                                "content_hash": header["content_hash"],
+                                "source_path": member["source_path"],
+                                "segment_index": index,
+                                "segment_metadata": metadata,
+                                "role": role,
+                            })
+                            visual_records += 1
+                            characters += len(text)
                     else:
+                        write_record({
+                            "mode": "text",
+                            "text": text,
+                            "images": [],
+                            "content_hash": header["content_hash"],
+                            "source_path": member["source_path"],
+                            "segment_index": index,
+                            "segment_metadata": segment.metadata,
+                            "role": role,
+                        })
                         text_records += 1
+                        characters += len(text)
+                    emitted_segment = True
 
                 document_text = str(header.get("text") or "").strip()
                 if not emitted_segment and document_text:
