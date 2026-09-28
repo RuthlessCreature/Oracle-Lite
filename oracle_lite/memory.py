@@ -31,19 +31,26 @@ class MemoryPolicy:
     @classmethod
     def auto(cls) -> "MemoryPolicy":
         total = int(psutil.virtual_memory().total)
-        reserve = int(max(12 * GIB, total * 0.25))
-        # Keep one parser worker bounded so a pathological source file cannot
-        # consume the workstation. On a ~64 GiB host this yields ~8 GiB RSS and
-        # 10 GiB address-space hard cap, while ~16 GiB remains reserved for OS/UI.
-        worker_rss = int(min(8 * GIB, max(4 * GIB, total * 0.14)))
-        worker_as = int(min(10 * GIB, max(5 * GIB, total * 0.18)))
+        desired_reserve = int(max(12 * GIB, total * 0.25))
+        # Never let a fixed minimum reserve consume the whole machine on smaller
+        # hosts. Always leave at least 1 GiB available to the Oracle-Lite cgroup.
+        reserve = min(desired_reserve, max(0, total - GIB))
+        cgroup_memory_max = max(GIB, total - reserve)
+
+        # Derive parser caps from the already-safe cgroup budget. On a ~64 GiB
+        # workstation these remain ~8 GiB RSS and ~10 GiB address space.
+        worker_rss = int(min(8 * GIB, max(GIB, cgroup_memory_max * 0.50)))
+        worker_as = int(min(10 * GIB, max(2 * GIB, cgroup_memory_max * 0.75)))
+        worker_rss = min(worker_rss, cgroup_memory_max)
+        worker_as = min(worker_as, cgroup_memory_max)
+
         return cls(
             total_bytes=total,
             reserve_system_bytes=reserve,
             max_worker_rss_bytes=worker_rss,
             max_worker_address_space_bytes=worker_as,
             max_swap_growth_bytes=512 * MIB,
-            cgroup_memory_max_bytes=max(4 * GIB, total - reserve),
+            cgroup_memory_max_bytes=cgroup_memory_max,
             cgroup_swap_max_bytes=512 * MIB,
         )
 
