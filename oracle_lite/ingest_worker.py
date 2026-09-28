@@ -5,6 +5,7 @@ from pathlib import Path
 from queue import Queue
 
 from .canonical import CanonicalDocument, CanonicalSegment
+from .memory import apply_linux_address_space_limit
 from .normalize import normalize_text
 from .parsers import parse_file
 
@@ -17,8 +18,10 @@ def parse_and_write_canonical(
     content_hash: str,
     parser_version: str,
     result_queue,
+    address_space_limit_bytes: int,
 ) -> None:
     """Parse exactly one source file inside an isolated worker process."""
+    hard_limit_applied = apply_linux_address_space_limit(address_space_limit_bytes)
     try:
         source = Path(source_path)
         parsed = parse_file(source, asset_dir=Path(asset_dir))
@@ -77,12 +80,14 @@ def parse_and_write_canonical(
 
         result_queue.put({
             "ok": True,
+            "hard_limit_applied": hard_limit_applied,
             "visual_segments": visual_segments,
             "has_visual": bool(visual_segments),
         })
     except BaseException as exc:
         result_queue.put({
             "ok": False,
+            "hard_limit_applied": hard_limit_applied,
             "error": f"{type(exc).__name__}: {exc}",
         })
     finally:
