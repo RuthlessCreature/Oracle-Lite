@@ -11,7 +11,7 @@ from .text import parse_text_like
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
 
-def parse_file(path: str | Path, *, asset_dir: str | Path):
+def parse_file(path: str | Path, *, asset_dir: str | Path, memory_tier: int = 0):
     path = Path(path)
     asset_dir = Path(asset_dir)
     ext = path.suffix.lower()
@@ -21,11 +21,11 @@ def parse_file(path: str | Path, *, asset_dir: str | Path):
     if ext in {".json", ".jsonl"}:
         return parse_json_like(path)
     if ext == ".pdf":
-        return parse_pdf(path, asset_dir)
+        return parse_pdf(path, asset_dir, memory_tier=memory_tier)
     if ext == ".docx":
-        return parse_docx(path, asset_dir)
+        return parse_docx(path, asset_dir, memory_tier=memory_tier)
     if ext == ".pptx":
-        return parse_pptx(path, asset_dir)
+        return parse_pptx(path, asset_dir, memory_tier=memory_tier)
     if ext in IMAGE_EXTENSIONS:
         return parse_image(path, asset_dir)
 
