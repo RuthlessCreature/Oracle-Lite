@@ -61,3 +61,25 @@ def test_pdf_becomes_page_image_plus_page_text(tmp_path: Path):
     assert "E102" in doc.segments[0].text
     assert len(doc.segments[0].images) == 1
     assert Path(doc.segments[0].images[0]).exists()
+
+
+def test_large_pdf_page_is_rasterized_with_pixel_ceiling(tmp_path: Path):
+    cfg = make_cfg(tmp_path)
+    source = cfg.corpus_dir / "large-page.pdf"
+
+    pdf = fitz.open()
+    page = pdf.new_page(width=4000, height=3000)
+    page.insert_text((100, 100), "Large drawing page")
+    pdf.save(source)
+    pdf.close()
+
+    scan_corpus(cfg, verify_all=True)
+    stats = ingest_corpus(cfg)
+    assert stats.failed == 0
+
+    doc = canonical_for_only_source(cfg)
+    assert doc.segments
+    image_path = Path(doc.segments[0].images[0])
+    with Image.open(image_path) as image:
+        width, height = image.size
+    assert width * height <= 1_048_576 + 4096
