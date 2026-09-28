@@ -143,6 +143,7 @@ def run_domain_training(
     """Train with streaming data and RAM/disk/VRAM admission control."""
     try:
         import torch
+        import torchvision  # noqa: F401 - required by Qwen3.5 visual/video processor
         from datasets import load_dataset
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
         from transformers import (
@@ -154,9 +155,12 @@ def run_domain_training(
             TrainerCallback,
         )
         from transformers.trainer_utils import get_last_checkpoint
-    except ImportError as exc:
+    except (ImportError, RuntimeError, OSError) as exc:
         raise RuntimeError(
-            "Training dependencies are missing. Install with: pip install -e '.[train]'"
+            "Training runtime dependency preflight failed before model download. "
+            "Qwen3.5 multimodal processing requires a working torchvision build "
+            "compatible with the installed torch. Reinstall Oracle-Lite training "
+            "dependencies with: python -m pip install -U -e '.[train]'"
         ) from exc
 
     policy = HostResourcePolicy.auto(app_cfg.output_dir)
