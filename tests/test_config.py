@@ -15,12 +15,18 @@ def test_three_field_config_derives_internal_paths(tmp_path: Path):
     )
 
     cfg = load_config(config)
+    scoped = (tmp_path / "output" / "_corpora" / cfg.corpus_id).resolve()
     assert cfg.minimax_api_key == "sk-cp-test"
     assert cfg.corpus_dir == (tmp_path / "corpus").resolve()
-    assert cfg.registry_path == (
-        tmp_path / "output" / "_corpora" / cfg.corpus_id / "_state" / "registry.sqlite3"
-    ).resolve()
-    assert cfg.datasets_dir == (tmp_path / "output" / "datasets").resolve()
+    assert cfg.corpus_output_dir == scoped
+    assert cfg.registry_path == scoped / "_state" / "registry.sqlite3"
+    assert cfg.canonical_dir == scoped / "canonical"
+    assert cfg.assets_dir == scoped / "assets"
+    assert cfg.snapshots_dir == scoped / "snapshots"
+    assert cfg.datasets_dir == scoped / "datasets"
+    assert cfg.training_dir == scoped / "training"
+    assert cfg.logs_dir == scoped / "logs"
+    assert cfg.models_dir == (tmp_path / "output" / "models").resolve()
 
 
 def test_unknown_config_key_is_rejected(tmp_path: Path):
