@@ -9,6 +9,7 @@ from .base import ParsedDocument, ParsedSegment
 
 
 def parse_image(path: Path, asset_dir: Path) -> ParsedDocument:
+    """Preserve a native image without inventing a text label from its filename."""
     asset_dir.mkdir(parents=True, exist_ok=True)
     suffix = path.suffix.lower() or ".png"
     target = asset_dir / f"source{suffix}"
@@ -18,15 +19,14 @@ def parse_image(path: Path, asset_dir: Path) -> ParsedDocument:
         width, height = img.size
         mode = img.mode
 
-    text = path.stem.replace("_", " ").replace("-", " ").strip()
     return ParsedDocument(
         title=path.stem,
-        text=text,
+        text="",
         segments=[
             ParsedSegment(
-                text=text,
+                text="",
                 images=[str(target.resolve())],
-                metadata={"kind": "native_image"},
+                metadata={"kind": "native_image", "label_status": "unlabeled"},
             )
         ],
         metadata={
