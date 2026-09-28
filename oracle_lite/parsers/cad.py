@@ -38,9 +38,13 @@ def parse_step(path: Path, asset_dir: Path) -> ParsedDocument:
                 header_lines.append(line.strip())
             if in_header and "ENDSEC;" in upper:
                 joined = "\n".join(header_lines)
-                match = _STEP_SCHEMA.search(joined)
-                if match:
-                    schemas = re.findall(r"'([^']+)'", match.group(1))
+                schema_pos = joined.upper().find("FILE_SCHEMA")
+                if schema_pos >= 0:
+                    statement = joined[schema_pos:]
+                    end = statement.find(";")
+                    if end >= 0:
+                        statement = statement[: end + 1]
+                    schemas = re.findall(r"'([^']+)'", statement)
                 in_header = False
             match = _STEP_ENTITY.match(line)
             if match:
