@@ -14,7 +14,7 @@ from .dashboard import MonitorLoggingHandler, TrainingDashboard, TrainingMonitor
 from .dataset import build_domain_dataset
 from .db import Registry
 from .ingest import ingest_corpus
-from .memory import HostMemoryWatchdog, MemoryPolicy, ensure_linux_memory_scope
+from .memory import MemoryPolicy, MemoryPressureGate, ensure_linux_memory_scope
 from .models import DEFAULT_BASE_MODEL_ID, ensure_base_model
 from .pipeline import run_one_click
 from .scanner import scan_corpus
@@ -33,6 +33,27 @@ def _enter_hard_memory_scope() -> MemoryPolicy:
     policy = MemoryPolicy.auto()
     ensure_linux_memory_scope(policy)
     return policy
+
+
+def _memory_gate(policy: MemoryPolicy, cfg, monitor: TrainingMonitor | None = None) -> MemoryPressureGate:
+    gate = MemoryPressureGate(
+        policy,
+        log_dir=cfg.logs_dir,
+        on_pause=(lambda reason: monitor.set_memory_paused(reason)) if monitor else None,
+        on_resume=(lambda message: monitor.resume_from_memory(message)) if monitor else None,
+    )
+    gate.start()
+    if monitor is not None:
+        monitor.update("system", {
+            "memory_reserve_gb": round(policy.reserve_system_bytes / (1024 ** 3), 2),
+            "memory_resume_gb": round(policy.resume_system_bytes / (1024 ** 3), 2),
+            "parser_worker_rss_cap_gb": round(policy.max_worker_rss_bytes / (1024 ** 3), 2),
+            "parser_worker_as_cap_gb": round(policy.max_worker_address_space_bytes / (1024 ** 3), 2),
+            "max_swap_growth_gb": round(policy.max_swap_growth_bytes / (1024 ** 3), 2),
+            "cgroup_memory_max_gb": round(policy.cgroup_memory_max_bytes / (1024 ** 3), 2),
+            "cgroup_swap_max_gb": round(policy.cgroup_swap_max_bytes / (1024 ** 3), 2),
+        })
+    return gate
 
 
 @app.command()
@@ -69,9 +90,14 @@ def ingest(
     force: bool = typer.Option(False, help="Re-parse even if canonical artifact already exists"),
 ):
     """Parse source files into text + visual canonical artifacts."""
-    _enter_hard_memory_scope()
-    stats = ingest_corpus(load_config(config), force=force)
-    console.print_json(json.dumps(stats.as_dict()))
+    policy = _enter_hard_memory_scope()
+    cfg = load_config(config)
+    gate = _memory_gate(policy, cfg)
+    try:
+        stats = ingest_corpus(cfg, force=force, memory_gate=gate)
+        console.print_json(json.dumps(stats.as_dict()))
+    finally:
+        gate.stop()
 
 
 @app.command()
@@ -108,20 +134,26 @@ def build_domain(
     max_records_per_shard: int = typer.Option(2000),
 ):
     """Build mixed text + image/text domain-adaptation JSONL."""
-    _enter_hard_memory_scope()
-    result = build_domain_dataset(
-        load_config(config),
-        snapshot_id=snapshot_id,
-        max_records_per_shard=max_records_per_shard,
-    )
-    console.print_json(json.dumps({
-        "output_dir": str(result.output_dir),
-        "records": result.records,
-        "text_records": result.text_records,
-        "visual_records": result.visual_records,
-        "characters": result.characters,
-        "shards": [str(p) for p in result.shard_paths],
-    }))
+    policy = _enter_hard_memory_scope()
+    cfg = load_config(config)
+    gate = _memory_gate(policy, cfg)
+    try:
+        result = build_domain_dataset(
+            cfg,
+            snapshot_id=snapshot_id,
+            max_records_per_shard=max_records_per_shard,
+            memory_gate=gate,
+        )
+        console.print_json(json.dumps({
+            "output_dir": str(result.output_dir),
+            "records": result.records,
+            "text_records": result.text_records,
+            "visual_records": result.visual_records,
+            "characters": result.characters,
+            "shards": [str(p) for p in result.shard_paths],
+        }))
+    finally:
+        gate.stop()
 
 
 @app.command()
@@ -134,33 +166,43 @@ def prepare(
     verify_all: bool = typer.Option(False, help="Force SHA-256 verification for every source file"),
 ):
     """Run scan -> multimodal ingest -> snapshot -> domain dataset build."""
-    _enter_hard_memory_scope()
+    policy = _enter_hard_memory_scope()
     cfg = load_config(config)
-    scan_stats = scan_corpus(cfg, verify_all=verify_all)
-    ingest_stats = ingest_corpus(cfg)
-    snap = create_snapshot(
-        cfg,
-        name=name,
-        mode=mode,
-        base_snapshot_id=base,
-        history_replay_ratio=replay_ratio,
-        seed=42,
-    )
-    dataset = build_domain_dataset(cfg, snapshot_id=snap.snapshot_id)
+    gate = _memory_gate(policy, cfg)
+    try:
+        scan_stats = scan_corpus(cfg, verify_all=verify_all)
+        gate.wait_until_safe(context="starting corpus ingestion")
+        ingest_stats = ingest_corpus(cfg, memory_gate=gate)
+        gate.wait_until_safe(context="creating snapshot")
+        snap = create_snapshot(
+            cfg,
+            name=name,
+            mode=mode,
+            base_snapshot_id=base,
+            history_replay_ratio=replay_ratio,
+            seed=42,
+        )
+        dataset = build_domain_dataset(
+            cfg,
+            snapshot_id=snap.snapshot_id,
+            memory_gate=gate,
+        )
 
-    console.print_json(json.dumps({
-        "scan": scan_stats.as_dict(),
-        "ingest": ingest_stats.as_dict(),
-        "snapshot_id": snap.snapshot_id,
-        "snapshot_total": snap.total,
-        "snapshot_current": snap.current,
-        "snapshot_replay": snap.replay,
-        "dataset_dir": str(dataset.output_dir),
-        "records": dataset.records,
-        "text_records": dataset.text_records,
-        "visual_records": dataset.visual_records,
-        "characters": dataset.characters,
-    }))
+        console.print_json(json.dumps({
+            "scan": scan_stats.as_dict(),
+            "ingest": ingest_stats.as_dict(),
+            "snapshot_id": snap.snapshot_id,
+            "snapshot_total": snap.total,
+            "snapshot_current": snap.current,
+            "snapshot_replay": snap.replay,
+            "dataset_dir": str(dataset.output_dir),
+            "records": dataset.records,
+            "text_records": dataset.text_records,
+            "visual_records": dataset.visual_records,
+            "characters": dataset.characters,
+        }))
+    finally:
+        gate.stop()
 
 
 @app.command("download-model")
@@ -192,21 +234,7 @@ def train(
 
     url = dashboard.start()
     console.print(f"[cyan]Oracle-Lite Training Console[/cyan] {url}")
-    watchdog = HostMemoryWatchdog(
-        reserve_bytes=memory_policy.reserve_system_bytes,
-        log_dir=cfg.logs_dir,
-        on_warning=lambda message: monitor.log("ERROR", message),
-        max_swap_growth_bytes=memory_policy.max_swap_growth_bytes,
-    )
-    watchdog.start()
-    monitor.update("system", {
-        "memory_reserve_gb": round(memory_policy.reserve_system_bytes / (1024 ** 3), 2),
-        "parser_worker_rss_cap_gb": round(memory_policy.max_worker_rss_bytes / (1024 ** 3), 2),
-        "parser_worker_as_cap_gb": round(memory_policy.max_worker_address_space_bytes / (1024 ** 3), 2),
-        "max_swap_growth_gb": round(memory_policy.max_swap_growth_bytes / (1024 ** 3), 2),
-        "cgroup_memory_max_gb": round(memory_policy.cgroup_memory_max_bytes / (1024 ** 3), 2),
-        "cgroup_swap_max_gb": round(memory_policy.cgroup_swap_max_bytes / (1024 ** 3), 2),
-    })
+    memory_gate = _memory_gate(memory_policy, cfg, monitor)
 
     try:
         monitor.update("dataset", {"snapshot_id": snapshot_id})
@@ -215,6 +243,7 @@ def train(
             snapshot_id=snapshot_id,
             max_steps=max_steps,
             monitor=monitor,
+            memory_gate=memory_gate,
         )
         monitor.finish(status="completed", label="Training completed")
         final_state = monitor.save_final_state()
@@ -229,7 +258,7 @@ def train(
         time.sleep(1.2)
         raise
     finally:
-        watchdog.stop()
+        memory_gate.stop()
         logging.getLogger().removeHandler(log_handler)
         dashboard.stop()
 
@@ -257,21 +286,7 @@ def run(
 
     url = dashboard.start()
     console.print(f"[cyan]Oracle-Lite Training Console[/cyan] {url}")
-    watchdog = HostMemoryWatchdog(
-        reserve_bytes=memory_policy.reserve_system_bytes,
-        log_dir=cfg.logs_dir,
-        on_warning=lambda message: monitor.log("ERROR", message),
-        max_swap_growth_bytes=memory_policy.max_swap_growth_bytes,
-    )
-    watchdog.start()
-    monitor.update("system", {
-        "memory_reserve_gb": round(memory_policy.reserve_system_bytes / (1024 ** 3), 2),
-        "parser_worker_rss_cap_gb": round(memory_policy.max_worker_rss_bytes / (1024 ** 3), 2),
-        "parser_worker_as_cap_gb": round(memory_policy.max_worker_address_space_bytes / (1024 ** 3), 2),
-        "max_swap_growth_gb": round(memory_policy.max_swap_growth_bytes / (1024 ** 3), 2),
-        "cgroup_memory_max_gb": round(memory_policy.cgroup_memory_max_bytes / (1024 ** 3), 2),
-        "cgroup_swap_max_gb": round(memory_policy.cgroup_swap_max_bytes / (1024 ** 3), 2),
-    })
+    memory_gate = _memory_gate(memory_policy, cfg, monitor)
 
     try:
         monitor.update_phase("bootstrap", "Starting one-click training")
@@ -280,10 +295,16 @@ def run(
             max_steps=max_steps,
             verify_all=verify_all,
             monitor=monitor,
+            memory_gate=memory_gate,
         )
 
         if result.status == "up_to_date":
             monitor.finish(status="completed", label="Current corpus is already up to date")
+        elif "deferred_memory" in result.status:
+            monitor.finish(
+                status="completed_with_warnings",
+                label="Training completed; memory-deferred files will retry next run",
+            )
         else:
             monitor.finish(status="completed", label="Training completed")
 
@@ -309,7 +330,7 @@ def run(
         time.sleep(1.2)
         raise
     finally:
-        watchdog.stop()
+        memory_gate.stop()
         logging.getLogger().removeHandler(log_handler)
         dashboard.stop()
 
