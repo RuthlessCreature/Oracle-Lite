@@ -5,6 +5,7 @@ from oracle_lite.canonical import CanonicalDocument
 from oracle_lite.config import AppConfig
 from oracle_lite.db import Registry
 from oracle_lite.ingest import ingest_corpus
+from oracle_lite.ingest_worker import _stream_low_memory_canonical
 from oracle_lite.scanner import scan_corpus
 
 
@@ -40,3 +41,26 @@ def test_json_ingestion_creates_traceable_canonical_artifact(tmp_path: Path):
 
     canonical = CanonicalDocument.read_json(canonical_path)
     assert any("alarm_code: E102" in segment.text for segment in canonical.segments)
+
+
+def test_low_memory_text_fallback_streams_sidecar(tmp_path: Path):
+    source = tmp_path / "huge.txt"
+    source.write_text("abc\n" * 300000, encoding="utf-8")
+    canonical = tmp_path / "canonical.json"
+    assets = tmp_path / "assets"
+
+    result = _stream_low_memory_canonical(
+        source=source,
+        asset_dir=assets,
+        canonical_path=canonical,
+        content_hash="a" * 64,
+        parser_version="v3-memory-safe",
+        memory_level=2,
+    )
+
+    assert result["low_memory_mode"] is True
+    header = CanonicalDocument.read_header(canonical)
+    assert Path(header["segments_path"]).exists()
+    segments = list(CanonicalDocument.iter_segments(canonical))
+    assert len(segments) > 1
+    assert sum(len(s.text) for s in segments) > 100000
