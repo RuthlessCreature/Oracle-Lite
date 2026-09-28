@@ -85,8 +85,11 @@ def parse_and_write_canonical(
             "has_visual": bool(visual_segments),
         })
     except BaseException as exc:
+        errno = getattr(exc, "errno", None)
+        is_memory = isinstance(exc, MemoryError) or errno == 12
         result_queue.put({
             "ok": False,
+            "kind": "memory" if is_memory else "parser",
             "hard_limit_applied": hard_limit_applied,
             "error": f"{type(exc).__name__}: {exc}",
         })
