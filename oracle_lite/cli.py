@@ -14,6 +14,7 @@ from .dashboard import MonitorLoggingHandler, TrainingDashboard, TrainingMonitor
 from .dataset import build_domain_dataset
 from .db import Registry
 from .ingest import ingest_corpus
+from .memory import HostMemoryWatchdog, MemoryPolicy
 from .models import DEFAULT_BASE_MODEL_ID, ensure_base_model
 from .pipeline import run_one_click
 from .scanner import scan_corpus
@@ -181,6 +182,18 @@ def train(
 
     url = dashboard.start()
     console.print(f"[cyan]Oracle-Lite Training Console[/cyan] {url}")
+    memory_policy = MemoryPolicy.auto()
+    watchdog = HostMemoryWatchdog(
+        reserve_bytes=memory_policy.reserve_system_bytes,
+        log_dir=cfg.logs_dir,
+        on_warning=lambda message: monitor.log("ERROR", message),
+    )
+    watchdog.start()
+    monitor.update("system", {
+        "memory_reserve_gb": round(memory_policy.reserve_system_bytes / (1024 ** 3), 2),
+        "parser_worker_rss_cap_gb": round(memory_policy.max_worker_rss_bytes / (1024 ** 3), 2),
+        "parser_worker_as_cap_gb": round(memory_policy.max_worker_address_space_bytes / (1024 ** 3), 2),
+    })
 
     try:
         monitor.update("dataset", {"snapshot_id": snapshot_id})
@@ -203,6 +216,7 @@ def train(
         time.sleep(1.2)
         raise
     finally:
+        watchdog.stop()
         logging.getLogger().removeHandler(log_handler)
         dashboard.stop()
 
@@ -229,6 +243,18 @@ def run(
 
     url = dashboard.start()
     console.print(f"[cyan]Oracle-Lite Training Console[/cyan] {url}")
+    memory_policy = MemoryPolicy.auto()
+    watchdog = HostMemoryWatchdog(
+        reserve_bytes=memory_policy.reserve_system_bytes,
+        log_dir=cfg.logs_dir,
+        on_warning=lambda message: monitor.log("ERROR", message),
+    )
+    watchdog.start()
+    monitor.update("system", {
+        "memory_reserve_gb": round(memory_policy.reserve_system_bytes / (1024 ** 3), 2),
+        "parser_worker_rss_cap_gb": round(memory_policy.max_worker_rss_bytes / (1024 ** 3), 2),
+        "parser_worker_as_cap_gb": round(memory_policy.max_worker_address_space_bytes / (1024 ** 3), 2),
+    })
 
     try:
         monitor.update_phase("bootstrap", "Starting one-click training")
@@ -266,6 +292,7 @@ def run(
         time.sleep(1.2)
         raise
     finally:
+        watchdog.stop()
         logging.getLogger().removeHandler(log_handler)
         dashboard.stop()
 
