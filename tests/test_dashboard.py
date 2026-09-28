@@ -50,5 +50,7 @@ def test_dashboard_serves_html_and_state_api(tmp_path: Path):
         assert "ORACLE-LITE / TRAINING CONSOLE" in html
         assert "GPU / VRAM" in html
         assert "Live Logs" in html
+        assert "Parser memory" in html
+        assert "Process tree RSS" in html
     finally:
         dashboard.stop()
