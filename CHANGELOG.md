@@ -5,6 +5,9 @@
 ### Fixed
 - Corpus parsing now runs one source file per isolated worker process.
 - Parser-worker RSS and system available RAM are monitored continuously; unsafe workers are terminated before exhausting the workstation.
+- Linux parser workers receive an OS-level `RLIMIT_AS` hard cap before opening source content.
+- `oracle-lite run` and `oracle-lite train` keep at least 25% / 12 GiB host RAM reserved and terminate immediately if RAM crosses that redline.
+- Swap growth above the startup baseline is capped at roughly 512 MiB; exceeding it triggers an emergency stop before swap thrashing can freeze the desktop.
 - Canonical serialization no longer deep-copies the full document or constructs one giant JSON string.
 - Canonical segments are written to streamable JSONL sidecars and Dataset construction streams them line-by-line.
 - PDF parsing releases page/pixmap objects incrementally and avoids duplicate full-document text aggregation.
