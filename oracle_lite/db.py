@@ -105,6 +105,11 @@ class Registry:
     def connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
+        # Keep SQLite memory predictable for very large corpora. Expensive
+        # GROUP BY / EXCEPT / ORDER BY work spills to disk instead of RAM.
+        conn.execute("PRAGMA temp_store=FILE")
+        conn.execute("PRAGMA cache_size=-65536")
+        conn.execute("PRAGMA mmap_size=0")
         try:
             yield conn
             conn.commit()
@@ -173,6 +178,24 @@ class Registry:
                 (content_hash,),
             ).fetchall()
             return [r["path"] for r in rows]
+
+    def has_other_active_path_for_hash(
+        self,
+        content_hash: str,
+        path: str | Path,
+    ) -> bool:
+        path_s = str(Path(path).resolve())
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT 1
+                     FROM source_files
+                    WHERE content_hash=?
+                      AND status='active'
+                      AND path<>?
+                    LIMIT 1""",
+                (content_hash, path_s),
+            ).fetchone()
+            return row is not None
 
     def list_active_unique_content(self):
         # Backward-compatible small-data helper. Prefer iter_active_unique_content()
