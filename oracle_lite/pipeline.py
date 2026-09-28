@@ -5,7 +5,7 @@ import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .config import AppConfig
 from .dataset import build_domain_dataset
@@ -107,6 +107,7 @@ def run_one_click(
     max_steps: int | None = None,
     verify_all: bool = False,
     trainer: Callable[..., str] | None = None,
+    monitor: Any | None = None,
 ) -> OneClickResult:
     """Scan -> ingest -> freeze current corpus -> build dataset -> train/resume.
 
@@ -115,8 +116,27 @@ def run_one_click(
     from fragile adapter-chaining semantics. This is intentionally optimized for
     correctness and reproducibility rather than speed.
     """
+    if monitor is not None:
+        monitor.update_phase("scan", "Scanning corpus")
     scan_stats = scan_corpus(cfg, verify_all=verify_all)
+    if monitor is not None:
+        monitor.update("corpus", scan_stats.as_dict())
+        monitor.log("INFO", "Corpus scan completed", **scan_stats.as_dict())
+
+    if monitor is not None:
+        monitor.update_phase("ingest", "Parsing multimodal corpus")
     ingest_stats = ingest_corpus(cfg)
+    if monitor is not None:
+        corpus_state = scan_stats.as_dict()
+        corpus_state.update({
+            "ready": ingest_stats.ready,
+            "skipped": ingest_stats.skipped,
+            "failed": ingest_stats.failed,
+            "visual_documents": ingest_stats.visual_documents,
+            "visual_segments": ingest_stats.visual_segments,
+        })
+        monitor.update("corpus", corpus_state)
+        monitor.log("INFO", "Corpus ingest completed", **ingest_stats.as_dict())
 
     if ingest_stats.failed:
         raise RuntimeError(
@@ -132,6 +152,8 @@ def run_one_click(
             "No trainable canonical corpus is available. Check corpus_dir and parser failures."
         )
 
+    if monitor is not None:
+        monitor.update_phase("snapshot", "Freezing current corpus snapshot")
     latest_full = registry.latest_snapshot(mode="full")
     snapshot_reused = _snapshot_matches_current(
         registry,
@@ -147,7 +169,32 @@ def run_one_click(
         snap = create_snapshot(cfg, name=name, mode="full")
         snapshot_id = snap.snapshot_id
 
+    if monitor is not None:
+        monitor.update("dataset", {"snapshot_id": snapshot_id})
+        monitor.log(
+            "INFO",
+            "Snapshot selected",
+            snapshot_id=snapshot_id,
+            reused=snapshot_reused,
+        )
+        monitor.update_phase("dataset", "Building multimodal training dataset")
     dataset_meta, dataset_reused = _ensure_dataset(cfg, snapshot_id)
+    if monitor is not None:
+        monitor.update("dataset", {
+            "snapshot_id": snapshot_id,
+            "records": int(dataset_meta.get("records", 0)),
+            "text_records": int(dataset_meta.get("text_records", 0)),
+            "visual_records": int(dataset_meta.get("visual_records", 0)),
+            "characters": int(dataset_meta.get("characters", 0)),
+            "reused": dataset_reused,
+        })
+        monitor.log(
+            "INFO",
+            "Dataset ready",
+            records=int(dataset_meta.get("records", 0)),
+            visual_records=int(dataset_meta.get("visual_records", 0)),
+            reused=dataset_reused,
+        )
 
     # A normal no-argument run is idempotent once the current corpus is fully
     # trained. Smoke runs are never treated as completion.
@@ -166,8 +213,15 @@ def run_one_click(
             characters=int(dataset_meta.get("characters", 0)),
         )
 
-    trainer_fn = trainer or run_domain_training
-    run_id = trainer_fn(cfg, snapshot_id=snapshot_id, max_steps=max_steps)
+    if trainer is None:
+        run_id = run_domain_training(
+            cfg,
+            snapshot_id=snapshot_id,
+            max_steps=max_steps,
+            monitor=monitor,
+        )
+    else:
+        run_id = trainer(cfg, snapshot_id=snapshot_id, max_steps=max_steps)
 
     return OneClickResult(
         status="smoke_trained" if max_steps is not None else "trained",
