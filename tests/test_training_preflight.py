@@ -67,8 +67,24 @@ def test_trainingarguments_compat_uses_warmup_steps_when_ratio_name_is_absent():
     assert "warmup_ratio" not in dropped
 
 
-def test_package_versions_match_053():
+def test_base_multimodal_prompt_does_not_require_chat_template():
+    from oracle_lite.training import _base_multimodal_prompt
+
+    class FakeProcessor:
+        vision_start_token = "<VS>"
+        image_token = "<IMG>"
+        vision_end_token = "<VE>"
+
+    prompt = _base_multimodal_prompt(FakeProcessor())
+    assert prompt.startswith("<VS><IMG><VE>")
+    assert "SOURCE_GROUNDED_TEXT" in prompt
+
+    training = Path("oracle_lite/training.py").read_text(encoding="utf-8")
+    assert ".apply_chat_template(" not in training
+
+
+def test_package_versions_match_054():
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
     init = Path("oracle_lite/__init__.py").read_text(encoding="utf-8")
-    assert 'version = "0.5.3"' in pyproject
-    assert '__version__ = "0.5.3"' in init
+    assert 'version = "0.5.4"' in pyproject
+    assert '__version__ = "0.5.4"' in init
