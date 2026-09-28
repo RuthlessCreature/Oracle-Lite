@@ -1,19 +1,19 @@
 # Oracle-Lite
 
-Local-first dataset factory and incremental domain-model training pipeline.
+Local-first **multimodal** dataset factory and domain-model training pipeline.
 
-Oracle-Lite is designed for one practical setup:
+Oracle-Lite V0.2 is built around these fixed assumptions:
 
-- a continuously changing local corpus folder;
-- a local base model trained on your own NVIDIA GPU;
-- MiniMax M3 Token Plan used only as a low-risk **Data Janitor**;
-- immutable dataset snapshots so every training run can be reproduced.
+- corpus files live in one continuously changing local folder;
+- text, images, PDF pages, Word media and PowerPoint media are first-class source material;
+- the default base model is **Qwen/Qwen3.5-9B-Base**;
+- the base model is downloaded automatically into `output_dir/models/`;
+- local training targets one RTX 4080 16GB and prioritizes memory safety over speed;
+- MiniMax M3 Token Plan is a low-risk **Data Janitor**, never the source of domain truth.
 
-## Configuration
+## User configuration
 
-The user-facing config intentionally has **exactly three fields**.
-
-Copy `configs/oracle.example.yaml` to `oracle.yaml`:
+The editable config intentionally has exactly three fields:
 
 ```yaml
 minimax_api_key: "sk-cp-REPLACE_ME"
@@ -21,71 +21,113 @@ corpus_dir: "D:/OracleLite/corpus"
 output_dir: "D:/OracleLite/output"
 ```
 
-`oracle.yaml` is gitignored because it contains a secret.
+Copy `configs/oracle.example.yaml` to `oracle.yaml`. The file is gitignored.
 
-No model hyperparameters, parser versions, hash settings, registry paths, or RTX 4080 parameters belong in this file. Those are internal defaults.
+All parser settings, model ID, model download path, hashing, snapshot layout and RTX 4080 training defaults are internal code defaults.
 
-> `output_dir` must not be the same as, or inside, `corpus_dir`. Oracle-Lite rejects that layout to prevent generated datasets/checkpoints from being scanned back into the corpus.
+## What is multimodal here?
 
-## Data model
-
-The source folder is mutable. Training data is not.
+Oracle-Lite does not merely load a VLM and then throw the images away.
 
 ```text
-corpus_dir/
-    |
-    v
-Incremental Scanner
-(size + mtime fast path; SHA-256 authoritative identity)
-    |
-    v
-Source Registry (SQLite)
-    |
-    v
-Canonical Parser
-TXT / MD / CSV / JSON / JSONL / PDF / DOCX / PPTX
-    |
-    v
-Immutable Canonical Artifacts
-    |
-    v
-Dataset Snapshot
-    |
-    +--> CPT JSONL shards
-    +--> later: SFT / Eval / RAG lanes
-    |
-    v
-Local QLoRA CPT
+dynamic corpus
+  |
+  +-- TXT / MD / CSV / JSON / JSONL
+  +-- PDF
+  +-- DOCX
+  +-- PPTX
+  +-- PNG / JPG / JPEG / WEBP / BMP / TIFF
+  |
+  v
+SHA-256 Registry
+  |
+  v
+Multimodal Canonical Layer
+  |
+  +-- text
+  +-- image assets
+  +-- page / slide / segment relationship
+  |
+  v
+Immutable Snapshot
+  |
+  v
+Mixed Domain Dataset
+  |
+  +-- text-only CLM records
+  +-- image + source-text grounded records
+  |
+  v
+Qwen3.5-9B-Base 4-bit QLoRA
 ```
 
-A file rename or duplicate copy does not create a second content object because identity is based on content hash. Changed content creates a new revision. Deleted files are tombstoned instead of erasing history.
+### PDF
 
-## MiniMax M3 role
+Each PDF page is preserved as:
 
-MiniMax M3 is **not a teacher model** and is never treated as a source of domain truth.
+- page raster image;
+- text extracted from that same page;
+- page number metadata.
 
-Its allowed role is low-risk Data Janitor work such as:
+This creates deterministic image/text grounding without a teacher model.
+
+### PPTX
+
+Each slide preserves:
+
+- slide text and tables in layout order;
+- raster images embedded in that slide;
+- slide number metadata.
+
+### DOCX
+
+Word text/tables are retained and raster media inside the document are extracted as visual assets.
+
+### Native images
+
+Image files are retained as visual canonical assets. If there is no source-grounded text label, they are preserved but not used as supervised visual training targets yet.
+
+## Why unlabeled images are not invented into training data
+
+With no strong teacher model, Oracle-Lite does **not** fabricate captions or expert answers for image-only material.
+
+A visual record is trained only when reliable source-grounded text exists, such as:
+
+- PDF page image + PDF text layer;
+- PPT slide images + slide text;
+- DOCX media + document text.
+
+Scanned PDFs and image-only sources remain available in Canonical storage for later OCR/RAG work.
+
+## MiniMax M3
+
+MiniMax is configured through the China endpoint in `oracle_lite/minimax.py`.
+
+Allowed Data Janitor work:
 
 - classification;
 - metadata extraction;
 - title/section recovery;
-- format cleanup;
 - quality flags;
-- paraphrasing a question when the answer is already fixed by source data.
+- formatting cleanup;
+- source-grounded paraphrase.
 
-It must not invent professional answers, fill missing facts, alter numerical values, or manufacture reasoning chains for training.
+Forbidden as authoritative training truth:
 
-The API client is implemented in `oracle_lite/minimax.py`. Deterministic scan/parse/snapshot operations do not require an API call.
+- inventing professional answers;
+- filling missing facts;
+- changing numbers, units, alarm codes, dates or versions;
+- generating unsupported reasoning.
 
 ## Install
 
-Data pipeline only:
+Data factory:
 
 ```bash
 pip install -e .
 ```
 
-Local training dependencies:
+Training environment:
 
 ```bash
 pip install -e ".[train]"
@@ -93,60 +135,87 @@ pip install -e ".[train]"
 
 ## First run
 
-Create a config template if needed:
+Create config:
 
 ```bash
 oracle-lite init
 ```
 
-Put source material under the configured `corpus_dir`, then build a frozen training dataset:
+Put source files into `corpus_dir`, then:
 
 ```bash
 oracle-lite prepare --name initial
 ```
 
-This runs:
+This executes:
 
 ```text
-scan -> ingest -> snapshot -> build-cpt
+scan
+-> multimodal ingest
+-> immutable snapshot
+-> mixed domain dataset
 ```
 
-The command prints the generated `snapshot_id`.
+It prints a `snapshot_id`.
 
-Train that exact snapshot with a local Hugging Face model directory:
+## Base model download
+
+You do not configure a model path.
+
+Optional pre-download:
 
 ```bash
-oracle-lite train-cpt <snapshot_id> --base-model D:/models/Qwen-7B
+oracle-lite download-model
 ```
 
-For a short smoke test:
+Default model:
+
+```text
+Qwen/Qwen3.5-9B-Base
+```
+
+Local cache:
+
+```text
+output_dir/models/Qwen3.5-9B-Base/
+```
+
+If the model is absent when training starts, Oracle-Lite downloads it automatically.
+
+## Train
+
+Smoke test:
 
 ```bash
-oracle-lite train-cpt <snapshot_id> --base-model D:/models/Qwen-7B --max-steps 20
+oracle-lite train <snapshot_id> --max-steps 10
 ```
 
-## RTX 4080 16GB preset
+Full built-in run:
 
-Oracle-Lite V0.1 ships with an internal conservative preset intended for a single RTX 4080 16GB:
+```bash
+oracle-lite train <snapshot_id>
+```
 
-- 4-bit NF4 base weights;
-- double quantization;
+V0.2 RTX 4080 policy:
+
+- Qwen3.5-9B-Base;
+- 4-bit NF4;
 - BF16 compute;
-- LoRA rank 16;
-- sequence length 2048;
+- LoRA rank 8;
 - micro-batch 1;
-- gradient accumulation 16;
-- gradient checkpointing enabled;
+- gradient accumulation 32;
+- gradient checkpointing;
 - paged 8-bit AdamW;
+- native vision tower participates in forward processing;
+- vision tower base parameters are frozen;
+- trainable LoRA is kept outside visual/vision modules by default;
 - automatic checkpoint resume.
 
-These values are code defaults, not user config.
+The vision tower is frozen for memory safety, not bypassed. Image inputs still traverse the native Qwen3.5 visual encoder.
 
-The intended first target is a 7B/8B-class base model. Larger models may require additional offload work and are not the V0.1 default.
+## Incremental update
 
-## Incremental corpus update
-
-After new files arrive:
+After the corpus changes:
 
 ```bash
 oracle-lite prepare \
@@ -155,42 +224,33 @@ oracle-lite prepare \
   --base <previous_snapshot_id>
 ```
 
-The incremental snapshot contains new content plus a deterministic historical replay sample. Files added while a training run is already running do **not** alter that run; they enter a future snapshot.
+Hash identity handles duplicates and renames. New content is combined with deterministic historical replay. A running training job never reads the live corpus directly.
 
 ## Output layout
-
-Everything generated by Oracle-Lite is rooted under `output_dir`:
 
 ```text
 output_dir/
 ├── _state/
 │   └── registry.sqlite3
+├── assets/
 ├── canonical/
 ├── snapshots/
 ├── datasets/
+├── models/
+│   └── Qwen3.5-9B-Base/
 ├── training/
 └── logs/
 ```
 
-## Current parser scope
+## Known V0.2 limits
 
-Implemented:
-
-- TXT / Markdown / CSV
-- JSON / JSONL
-- DOCX paragraphs, headings and tables
-- PPTX text and tables ordered by slide position
-- text-layer PDF extraction
-
-Known V0.1 limitation:
-
-- image-only/scanned PDFs are detected but OCR is not yet implemented;
-- complex diagrams and charts are not semantically reconstructed;
-- SFT builders, RAG and full evaluation gates are subsequent milestones.
+- scanned PDF pages are visually preserved but OCR is not yet used as a deterministic label source;
+- PPTX embedded raster images are preserved, but the entire slide is not rendered into one screenshot;
+- DOCX media-to-paragraph anchoring is coarse;
+- vision tower base weights are frozen on the 4080 preset;
+- true large-scale multimodal continued pretraining is outside a single 16GB GPU envelope.
 
 ## Development
-
-Run core tests:
 
 ```bash
 pip install -e ".[dev]"
@@ -198,4 +258,4 @@ pytest -q
 python -m compileall -q oracle_lite
 ```
 
-See `docs/ARCHITECTURE.md` for the system boundary and invariants.
+See `docs/ARCHITECTURE.md`.
