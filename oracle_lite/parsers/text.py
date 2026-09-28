@@ -10,7 +10,8 @@ ENCODINGS = ("utf-8", "utf-8-sig", "gb18030", "latin-1")
 
 
 def _detect_encoding(path: Path) -> str:
-    sample = path.read_bytes()[:1024 * 1024]
+    with path.open("rb") as f:
+        sample = f.read(1024 * 1024)
     for encoding in ENCODINGS:
         try:
             sample.decode(encoding)
