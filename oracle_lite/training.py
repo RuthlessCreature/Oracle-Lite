@@ -54,7 +54,7 @@ def _resize_for_4080(image, max_edge: int):
 
 
 class MultimodalDomainCollator:
-    """Batch-size-1 collator mixing text CLM and source-grounded vision supervision."""
+    """Batch-size-1 collator mixing text CLM and source-grounded VLM supervision."""
 
     def __init__(self, processor, cfg: dict):
         self.processor = processor
@@ -63,9 +63,6 @@ class MultimodalDomainCollator:
     def __call__(self, features: list[dict]):
         if len(features) != 1:
             raise ValueError("RTX4080 multimodal preset requires micro_batch_size=1")
-
-        import torch
-        from PIL import Image
 
         item = features[0]
         mode = item.get("mode", "text")
@@ -86,67 +83,51 @@ class MultimodalDomainCollator:
             batch["labels"] = labels
             return batch
 
-        images = []
-        try:
-            for image_path in item["images"]:
-                img = Image.open(image_path).convert("RGB")
-                images.append(_resize_for_4080(img, self.cfg["image_max_edge"]))
+        target_text = text[: self.cfg["visual_text_max_chars"]]
+        if not target_text:
+            raise ValueError("Visual record has no source-grounded target text")
 
-            # Deterministic source-grounded supervision: the target is only text
-            # extracted from the same source page/slide/document. No teacher model.
-            target_text = text[: self.cfg["visual_text_max_chars"]]
-            if not target_text:
-                raise ValueError("Visual record has no source-grounded target text")
+        user_content = [
+            {"type": "image", "path": str(Path(image_path).resolve())}
+            for image_path in item["images"]
+        ]
+        user_content.append({
+            "type": "text",
+            "text": (
+                "读取这些原始资料图像，理解其中可见的文字、表格、图示与版面结构。"
+                "仅依据图像本身，不补充外部事实。"
+            ),
+        })
 
-            user_content = [{"type": "image"} for _ in images]
-            user_content.append({
-                "type": "text",
-                "text": (
-                    "读取这些原始资料图像，理解其中可见的文字、表格、图示与版面结构。"
-                    "仅依据图像本身，不补充外部事实。"
-                ),
-            })
-            prompt_messages = [{"role": "user", "content": user_content}]
-            full_messages = [
-                *prompt_messages,
-                {"role": "assistant", "content": [{"type": "text", "text": target_text}]},
-            ]
+        prompt_messages = [{"role": "user", "content": user_content}]
+        full_messages = [
+            *prompt_messages,
+            {"role": "assistant", "content": [{"type": "text", "text": target_text}]},
+        ]
 
-            prompt_text = self.processor.apply_chat_template(
-                prompt_messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            full_text = self.processor.apply_chat_template(
-                full_messages,
-                tokenize=False,
-                add_generation_prompt=False,
-            )
+        prompt_batch = self.processor.apply_chat_template(
+            prompt_messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        batch = self.processor.apply_chat_template(
+            full_messages,
+            tokenize=True,
+            add_generation_prompt=False,
+            return_dict=True,
+            return_tensors="pt",
+        )
 
-            prompt_batch = self.processor(
-                text=[prompt_text],
-                images=images,
-                return_tensors="pt",
-                padding=False,
-            )
-            batch = self.processor(
-                text=[full_text],
-                images=images,
-                return_tensors="pt",
-                padding=False,
-            )
-
-            labels = batch["input_ids"].clone()
-            prompt_len = min(prompt_batch["input_ids"].shape[1], labels.shape[1])
-            labels[:, :prompt_len] = -100
-            pad_id = self.processor.tokenizer.pad_token_id
-            if pad_id is not None:
-                labels[labels == pad_id] = -100
-            batch["labels"] = labels
-            return batch
-        finally:
-            for image in images:
-                image.close()
+        labels = batch["input_ids"].clone()
+        prompt_len = min(prompt_batch["input_ids"].shape[1], labels.shape[1])
+        labels[:, :prompt_len] = -100
+        pad_id = self.processor.tokenizer.pad_token_id
+        if pad_id is not None:
+            labels[labels == pad_id] = -100
+        batch["labels"] = labels
+        return batch
 
 
 def run_domain_training(
