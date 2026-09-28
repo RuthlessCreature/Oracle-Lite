@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gc
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -35,7 +37,8 @@ def _extract_zip_media(path: Path, asset_dir: Path, prefix: str) -> list[str]:
                 continue
             kept += 1
             target = asset_dir / f"media-{kept:04d}{suffix}"
-            target.write_bytes(zf.read(name))
+            with zf.open(name) as source, target.open("wb") as dest:
+                shutil.copyfileobj(source, dest, length=1024 * 1024)
             assets.append(str(target.resolve()))
     return assets
 
@@ -80,7 +83,7 @@ def parse_docx(path: Path, asset_dir: Path) -> ParsedDocument:
     images = _extract_zip_media(path, asset_dir, "word/media/")
     return ParsedDocument(
         title=path.stem,
-        text=text,
+        text="",
         segments=[ParsedSegment(text=text, images=images, metadata={"kind": "docx"})],
         metadata={
             "extension": ".docx",
@@ -95,11 +98,12 @@ def parse_pdf(path: Path, asset_dir: Path) -> ParsedDocument:
     asset_dir.mkdir(parents=True, exist_ok=True)
     doc = fitz.open(path)
     segments: list[ParsedSegment] = []
-    pages: list[str] = []
     empty_pages = 0
 
     try:
-        for idx, page in enumerate(doc, start=1):
+        for page_index in range(doc.page_count):
+            idx = page_index + 1
+            page = doc.load_page(page_index)
             text = page.get_text("text").strip()
             if not text:
                 empty_pages += 1
@@ -110,8 +114,6 @@ def parse_pdf(path: Path, asset_dir: Path) -> ParsedDocument:
             image_path = asset_dir / f"page-{idx:04d}.png"
             pix.save(str(image_path))
 
-            page_text = f"## Page {idx}\n\n{text}" if text else f"## Page {idx}"
-            pages.append(page_text)
             segments.append(
                 ParsedSegment(
                     text=text,
@@ -119,12 +121,16 @@ def parse_pdf(path: Path, asset_dir: Path) -> ParsedDocument:
                     metadata={"kind": "pdf_page", "page": idx},
                 )
             )
+            del pix
+            del page
+            if idx % 8 == 0:
+                gc.collect()
     finally:
         doc.close()
 
     return ParsedDocument(
         title=path.stem,
-        text="\n\n".join(pages),
+        text="",
         segments=segments,
         metadata={
             "extension": ".pdf",
@@ -139,7 +145,6 @@ def parse_pptx(path: Path, asset_dir: Path) -> ParsedDocument:
     prs = Presentation(path)
     asset_dir.mkdir(parents=True, exist_ok=True)
     segments: list[ParsedSegment] = []
-    slide_blocks: list[str] = []
     table_count = 0
     image_count = 0
 
@@ -189,7 +194,6 @@ def parse_pptx(path: Path, asset_dir: Path) -> ParsedDocument:
 
         items.sort(key=lambda x: (x[0], x[1]))
         body = "\n\n".join(text for _, _, text in items)
-        slide_blocks.append(f"## Slide {slide_idx}\n\n{body}".rstrip())
         segments.append(
             ParsedSegment(
                 text=body,
@@ -200,7 +204,7 @@ def parse_pptx(path: Path, asset_dir: Path) -> ParsedDocument:
 
     return ParsedDocument(
         title=path.stem,
-        text="\n\n".join(slide_blocks),
+        text="",
         segments=segments,
         metadata={
             "extension": ".pptx",
