@@ -2,7 +2,7 @@
 
 Local-first **multimodal** dataset factory and domain-model training pipeline.
 
-Oracle-Lite V0.4.2 is built around these fixed assumptions:
+Oracle-Lite V0.4.3 is built around these fixed assumptions:
 
 - corpus files live in one continuously changing local folder;
 - text, images, PDF pages, Word media and PowerPoint media are first-class source material;
@@ -29,7 +29,7 @@ All parser settings, model ID, model download path, hashing, snapshot layout and
 
 Oracle-Lite always walks the corpus directory on startup so it can discover new, deleted or renamed files, but it does **not** recompute SHA-256 for unchanged files. If path, size and nanosecond mtime match the registry, the existing content hash is reused immediately.
 
-After upgrading to V0.4.2, existing hashes are still reused. The parser version changes to `v3-memory-safe`, so existing sources are parsed once into the new memory-safe Canonical format; subsequent runs reuse those Canonical artifacts too.
+After upgrading to V0.4.3, existing hashes are still reused. The parser version changes to `v3-memory-safe`, so existing sources are parsed once into the new memory-safe Canonical format; subsequent runs reuse those Canonical artifacts too.
 
 ## What is multimodal here?
 
@@ -223,6 +223,14 @@ The server binds to localhost only. Runtime logs are also persisted under `outpu
 
 If NVML/GPU telemetry is unavailable, GPU monitoring degrades gracefully and training continues.
 
+### Hard memory invariant on Ubuntu/Linux
+
+Memory-heavy commands (`run`, `train`, `ingest`, `prepare`, `build-domain`) first re-exec themselves inside a per-user systemd/cgroup scope. The scope gets an OS-enforced `MemoryMax` equal to host RAM minus Oracle-Lite's reserved system margin, plus a `MemorySwapMax` of roughly 512 MiB. If the user systemd/cgroup scope cannot be established, Oracle-Lite fails closed and refuses to run unguarded.
+
+On a ~64 GiB workstation, the current automatic policy keeps about 16 GiB outside the Oracle-Lite cgroup for Ubuntu/UI, while Oracle-Lite itself is hard-contained to roughly the remaining 48 GiB. The exact values are shown in the Web Training Console.
+
+The Linux kernel documents `memory.max` as the cgroup hard memory limit and `memory.swap.max` as the hard swap limit for that cgroup.
+
 ### Memory safety during corpus parsing
 
 Each source file is parsed in an isolated worker process. On Linux, the worker receives an OS-level `RLIMIT_AS` hard address-space cap before it opens source content. Oracle-Lite also keeps a conservative host-RAM reserve (at least 25% / 12 GiB, whichever is larger), monitors parser-worker RSS, and allows only about 512 MiB of additional swap growth during a run. If any redline is crossed, the worker or Oracle-Lite itself is terminated immediately rather than allowing the workstation to become unresponsive.
@@ -244,7 +252,7 @@ oracle-lite train <snapshot_id>
 oracle-lite download-model
 ```
 
-V0.4.2 RTX 4080 policy:
+V0.4.3 RTX 4080 policy:
 
 - Qwen3.5-9B-Base;
 - 4-bit NF4;
@@ -287,7 +295,7 @@ output_dir/
 └── logs/
 ```
 
-## Known V0.4.2 limits
+## Known V0.4.3 limits
 
 - scanned PDF pages are visually preserved but OCR is not yet used as a deterministic label source;
 - PPTX embedded raster images are preserved, but the entire slide is not rendered into one screenshot;
