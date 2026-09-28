@@ -17,7 +17,9 @@ def test_three_field_config_derives_internal_paths(tmp_path: Path):
     cfg = load_config(config)
     assert cfg.minimax_api_key == "sk-cp-test"
     assert cfg.corpus_dir == (tmp_path / "corpus").resolve()
-    assert cfg.registry_path == (tmp_path / "output" / "_state" / "registry.sqlite3").resolve()
+    assert cfg.registry_path == (
+        tmp_path / "output" / "_corpora" / cfg.corpus_id / "_state" / "registry.sqlite3"
+    ).resolve()
     assert cfg.datasets_dir == (tmp_path / "output" / "datasets").resolve()
 
 
