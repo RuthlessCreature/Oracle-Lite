@@ -22,7 +22,6 @@ RTX4080_16GB_MULTIMODAL_PRESET = {
     "target_modules": "all-linear",
     "text_max_length": 2048,
     "visual_text_max_chars": 6000,
-    "image_max_edge": 1280,
     "micro_batch_size": 1,
     "gradient_accumulation_steps": 32,
     "gradient_checkpointing": True,
@@ -42,15 +41,6 @@ RTX4080_16GB_MULTIMODAL_PRESET = {
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _resize_for_4080(image, max_edge: int):
-    width, height = image.size
-    edge = max(width, height)
-    if edge <= max_edge:
-        return image
-    scale = max_edge / edge
-    return image.resize((max(1, int(width * scale)), max(1, int(height * scale))))
 
 
 class MultimodalDomainCollator:
