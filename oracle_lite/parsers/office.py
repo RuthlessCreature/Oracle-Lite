@@ -43,7 +43,7 @@ def _extract_zip_media(path: Path, asset_dir: Path, prefix: str) -> list[str]:
     return assets
 
 
-def parse_docx(path: Path, asset_dir: Path) -> ParsedDocument:
+def parse_docx(path: Path, asset_dir: Path, *, memory_tier: int = 0) -> ParsedDocument:
     doc = Document(path)
     blocks: list[str] = []
     headings = 0
@@ -80,7 +80,7 @@ def parse_docx(path: Path, asset_dir: Path) -> ParsedDocument:
         tables += 1
 
     text = "\n\n".join(blocks)
-    images = _extract_zip_media(path, asset_dir, "word/media/")
+    images = [] if memory_tier >= 2 else _extract_zip_media(path, asset_dir, "word/media/")
     return ParsedDocument(
         title=path.stem,
         text="",
@@ -94,7 +94,7 @@ def parse_docx(path: Path, asset_dir: Path) -> ParsedDocument:
     )
 
 
-def parse_pdf(path: Path, asset_dir: Path) -> ParsedDocument:
+def parse_pdf(path: Path, asset_dir: Path, *, memory_tier: int = 0) -> ParsedDocument:
     asset_dir.mkdir(parents=True, exist_ok=True)
     doc = fitz.open(path)
     segments: list[ParsedSegment] = []
@@ -110,7 +110,8 @@ def parse_pdf(path: Path, asset_dir: Path) -> ParsedDocument:
 
             # Preserve the actual page as the visual truth. 1.5x keeps diagrams
             # and tables legible while avoiding absurd raster sizes on a 4080.
-            pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+            scale = 1.5 if memory_tier == 0 else (1.0 if memory_tier == 1 else 0.75)
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
             image_path = asset_dir / f"page-{idx:04d}.png"
             pix.save(str(image_path))
 
@@ -141,7 +142,7 @@ def parse_pdf(path: Path, asset_dir: Path) -> ParsedDocument:
     )
 
 
-def parse_pptx(path: Path, asset_dir: Path) -> ParsedDocument:
+def parse_pptx(path: Path, asset_dir: Path, *, memory_tier: int = 0) -> ParsedDocument:
     prs = Presentation(path)
     asset_dir.mkdir(parents=True, exist_ok=True)
     segments: list[ParsedSegment] = []
@@ -181,7 +182,7 @@ def parse_pptx(path: Path, asset_dir: Path) -> ParsedDocument:
                     items.append((top, left, "\n".join(md)))
                     table_count += 1
 
-            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+            if memory_tier < 2 and shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
                 ext = _safe_suffix(shape.image.filename, ".png")
                 if ext in RASTER_EXTENSIONS:
                     target = (
