@@ -27,13 +27,19 @@ class MemoryPolicy:
     @classmethod
     def auto(cls) -> "MemoryPolicy":
         total = int(psutil.virtual_memory().total)
-        reserve = int(max(12 * GIB, total * 0.25))
-        resume = int(min(total * 0.55, reserve + max(3 * GIB, total * 0.06)))
 
-        # Conservative defaults for a workstation. On a ~64 GiB host:
-        # reserve ~16 GiB for OS/UI, parser RSS cap ~8 GiB, AS cap ~12 GiB.
-        worker_rss = int(min(8 * GIB, max(4 * GIB, total * 0.14)))
-        worker_as = int(min(12 * GIB, max(6 * GIB, total * 0.20)))
+        # Scale down sanely on small CI/dev hosts while staying deliberately
+        # conservative on the target ~64 GiB Ubuntu workstation.
+        if total >= 48 * GIB:
+            reserve_target = max(12 * GIB, total * 0.25)
+        else:
+            reserve_target = max(2 * GIB, total * 0.30)
+        reserve = int(min(reserve_target, total * 0.50))
+        resume = int(min(total * 0.60, reserve + max(2 * GIB, total * 0.06)))
+
+        # On ~64 GiB: ~8 GiB RSS cap and ~12 GiB address-space hard cap.
+        worker_rss = int(min(8 * GIB, max(2 * GIB, total * 0.125), total * 0.25))
+        worker_as = int(min(12 * GIB, max(3 * GIB, total * 0.19), total * 0.35))
         return cls(
             total_bytes=total,
             reserve_system_bytes=reserve,
