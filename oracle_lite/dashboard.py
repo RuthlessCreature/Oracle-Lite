@@ -158,6 +158,15 @@ class TrainingMonitor:
             state["log_file"] = str(self.log_path)
             return state
 
+    def save_final_state(self) -> Path:
+        path = self.log_dir / f"training-console-{self.session_id}-final.json"
+        payload = self.snapshot()
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return path
+
     def _sample_loop(self, interval_seconds: float) -> None:
         try:
             import psutil
