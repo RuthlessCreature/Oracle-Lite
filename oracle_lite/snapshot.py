@@ -250,20 +250,38 @@ def create_snapshot(
                 float(member["weight"]),
             ))
             if len(batch) >= 1000:
+                wait_for_disk(
+                    cfg.output_dir,
+                    policy,
+                    required_bytes=512 * MIB,
+                    poll_seconds=2.0,
+                    stable_samples=1,
+                )
                 conn.executemany(
                     """INSERT INTO snapshot_members(
                            snapshot_id,content_hash,source_path,canonical_path,role,weight
                        ) VALUES(?,?,?,?,?,?)""",
                     batch,
                 )
+                conn.commit()
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
                 batch.clear()
         if batch:
+            wait_for_disk(
+                cfg.output_dir,
+                policy,
+                required_bytes=512 * MIB,
+                poll_seconds=2.0,
+                stable_samples=1,
+            )
             conn.executemany(
                 """INSERT INTO snapshot_members(
                        snapshot_id,content_hash,source_path,canonical_path,role,weight
                    ) VALUES(?,?,?,?,?,?)""",
                 batch,
             )
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
     return SnapshotResult(
         snapshot_id=snapshot_id,
