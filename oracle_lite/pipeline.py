@@ -95,7 +95,10 @@ def _is_fully_trained(cfg: AppConfig, registry: Registry, snapshot_id: str) -> b
     except json.JSONDecodeError:
         return False
 
-    # Smoke tests use max_steps >= 0 and must never mark the snapshot as fully done.
+    # V0.4.4 streaming runs always have a positive max_steps, so smoke/full
+    # completion is explicit. Keep the old fallback for earlier run.json files.
+    if "smoke_test" in metadata:
+        return not bool(metadata.get("smoke_test"))
     max_steps = metadata.get("preset_values", {}).get("max_steps", -1)
     try:
         return int(max_steps) < 0
