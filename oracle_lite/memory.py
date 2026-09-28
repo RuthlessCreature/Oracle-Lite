@@ -13,6 +13,7 @@ import psutil
 
 
 GIB = 1024 ** 3
+MIB = 1024 ** 2
 
 
 @dataclass(slots=True, frozen=True)
@@ -21,6 +22,7 @@ class MemoryPolicy:
     reserve_system_bytes: int
     max_worker_rss_bytes: int
     max_worker_address_space_bytes: int
+    max_swap_growth_bytes: int
 
     @classmethod
     def auto(cls) -> "MemoryPolicy":
@@ -36,6 +38,7 @@ class MemoryPolicy:
             reserve_system_bytes=reserve,
             max_worker_rss_bytes=worker_rss,
             max_worker_address_space_bytes=worker_as,
+            max_swap_growth_bytes=512 * MIB,
         )
 
     def as_dict(self) -> dict[str, int | float]:
@@ -44,11 +47,13 @@ class MemoryPolicy:
             "reserve_system_bytes": self.reserve_system_bytes,
             "max_worker_rss_bytes": self.max_worker_rss_bytes,
             "max_worker_address_space_bytes": self.max_worker_address_space_bytes,
+            "max_swap_growth_bytes": self.max_swap_growth_bytes,
             "reserve_system_gb": round(self.reserve_system_bytes / GIB, 2),
             "max_worker_rss_gb": round(self.max_worker_rss_bytes / GIB, 2),
             "max_worker_address_space_gb": round(
                 self.max_worker_address_space_bytes / GIB, 2
             ),
+            "max_swap_growth_gb": round(self.max_swap_growth_bytes / GIB, 2),
         }
 
 
@@ -93,11 +98,14 @@ class HostMemoryWatchdog:
         log_dir: str | Path,
         interval_seconds: float = 0.25,
         on_warning: Callable[[str], None] | None = None,
+        max_swap_growth_bytes: int = 512 * MIB,
     ):
         self.reserve_bytes = int(reserve_bytes)
         self.log_dir = Path(log_dir)
         self.interval_seconds = float(interval_seconds)
         self.on_warning = on_warning
+        self.max_swap_growth_bytes = int(max_swap_growth_bytes)
+        self._swap_baseline = int(psutil.swap_memory().used)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -120,14 +128,31 @@ class HostMemoryWatchdog:
     def _run(self) -> None:
         while not self._stop.wait(self.interval_seconds):
             available = int(psutil.virtual_memory().available)
-            if available >= self.reserve_bytes:
+            swap_used = int(psutil.swap_memory().used)
+            swap_growth = max(0, swap_used - self._swap_baseline)
+
+            ram_critical = available < self.reserve_bytes
+            swap_critical = swap_growth > self.max_swap_growth_bytes
+            if not ram_critical and not swap_critical:
                 continue
 
+            if ram_critical:
+                reason = (
+                    "available host RAM "
+                    f"{available / GIB:.2f} GiB fell below reserved "
+                    f"{self.reserve_bytes / GIB:.2f} GiB"
+                )
+            else:
+                reason = (
+                    "swap grew by "
+                    f"{swap_growth / GIB:.2f} GiB above startup baseline "
+                    f"(limit {self.max_swap_growth_bytes / GIB:.2f} GiB)"
+                )
+
             message = (
-                "EMERGENCY MEMORY STOP: available host RAM "
-                f"{available / GIB:.2f} GiB fell below reserved "
-                f"{self.reserve_bytes / GIB:.2f} GiB. "
-                "Oracle-Lite is terminating immediately to protect the OS."
+                "EMERGENCY MEMORY STOP: "
+                + reason
+                + ". Oracle-Lite is terminating immediately to protect the OS."
             )
             try:
                 marker = self.log_dir / "memory-emergency.log"
