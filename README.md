@@ -2,7 +2,7 @@
 
 Local-first **multimodal** dataset factory and domain-model training pipeline.
 
-Oracle-Lite V0.4 is built around these fixed assumptions:
+Oracle-Lite V0.4.2 is built around these fixed assumptions:
 
 - corpus files live in one continuously changing local folder;
 - text, images, PDF pages, Word media and PowerPoint media are first-class source material;
@@ -24,6 +24,12 @@ output_dir: "D:/OracleLite/output"
 Copy `configs/oracle.example.yaml` to `oracle.yaml`. The file is gitignored.
 
 All parser settings, model ID, model download path, hashing, snapshot layout and RTX 4080 training defaults are internal code defaults.
+
+### Hash cache and restart behavior
+
+Oracle-Lite always walks the corpus directory on startup so it can discover new, deleted or renamed files, but it does **not** recompute SHA-256 for unchanged files. If path, size and nanosecond mtime match the registry, the existing content hash is reused immediately.
+
+After upgrading to V0.4.2, existing hashes are still reused. The parser version changes to `v3-memory-safe`, so existing sources are parsed once into the new memory-safe Canonical format; subsequent runs reuse those Canonical artifacts too.
 
 ## What is multimodal here?
 
@@ -217,6 +223,12 @@ The server binds to localhost only. Runtime logs are also persisted under `outpu
 
 If NVML/GPU telemetry is unavailable, GPU monitoring degrades gracefully and training continues.
 
+### Memory safety during corpus parsing
+
+Each source file is parsed in an isolated worker process. Oracle-Lite keeps a system-RAM reserve and monitors parser-worker RSS. If a pathological PDF/PPT/JSON attempts to consume unsafe amounts of memory, that worker is terminated and the source is reported as failed instead of allowing the workstation to become unresponsive.
+
+Canonical segments are stored in streamable JSONL sidecars, and Dataset construction reads both snapshot manifests and Canonical segments line-by-line. PDF page objects are released as they are rasterized; DOCX media extraction and text/JSONL readers use bounded streaming where possible.
+
 ## Advanced/manual commands
 
 Normal use should be `oracle-lite run`.
@@ -232,7 +244,7 @@ oracle-lite train <snapshot_id>
 oracle-lite download-model
 ```
 
-V0.4 RTX 4080 policy:
+V0.4.2 RTX 4080 policy:
 
 - Qwen3.5-9B-Base;
 - 4-bit NF4;
@@ -275,7 +287,7 @@ output_dir/
 └── logs/
 ```
 
-## Known V0.4 limits
+## Known V0.4.2 limits
 
 - scanned PDF pages are visually preserved but OCR is not yet used as a deterministic label source;
 - PPTX embedded raster images are preserved, but the entire slide is not rendered into one screenshot;
