@@ -79,7 +79,7 @@ class HostResourcePolicy:
             disk_total_bytes=disk_total,
             disk_reserve_bytes=disk_reserve,
             disk_resume_bytes=disk_resume,
-            gpu_step_reserve_bytes=int(1.5 * GIB),
+            gpu_step_reserve_bytes=int(2.5 * GIB),
             model_download_budget_bytes=30 * GIB,
             training_write_budget_bytes=10 * GIB,
         )
