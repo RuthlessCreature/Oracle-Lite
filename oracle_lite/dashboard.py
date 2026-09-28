@@ -139,6 +139,21 @@ class TrainingMonitor:
                 self._state["training"]["progress_percent"] = 100.0
         self.log("INFO", label)
 
+    def _rotate_log_if_needed(self) -> None:
+        max_bytes = 50 * 1024 * 1024
+        if not self.log_path.exists() or self.log_path.stat().st_size < max_bytes:
+            return
+        oldest = self.log_path.with_suffix(self.log_path.suffix + ".3")
+        oldest.unlink(missing_ok=True)
+        for index in (2, 1):
+            src = self.log_path.with_suffix(self.log_path.suffix + f".{index}")
+            dst = self.log_path.with_suffix(self.log_path.suffix + f".{index + 1}")
+            if src.exists():
+                src.replace(dst)
+        self.log_path.replace(
+            self.log_path.with_suffix(self.log_path.suffix + ".1")
+        )
+
     def log(self, level: str, message: str, **fields: Any) -> None:
         entry = {"time": _utcnow(), "level": str(level).upper(), "message": str(message)}
         if fields:
@@ -146,6 +161,7 @@ class TrainingMonitor:
         with self._lock:
             self._logs.append(entry)
         try:
+            self._rotate_log_if_needed()
             with self.log_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except OSError:
