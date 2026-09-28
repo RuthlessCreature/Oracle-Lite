@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.0 - 2026-09-28
+
+### Added
+- Auto-opened local Web Training Console for both `oracle-lite run` and manual `oracle-lite train`.
+- Live pipeline stages from corpus scan through final adapter save.
+- Hugging Face Trainer telemetry: step, max steps, progress, epoch, loss, learning rate, grad norm, elapsed time and ETA.
+- Checkpoint save/resume visibility.
+- GPU telemetry through NVML: utilization, VRAM, temperature and power.
+- CPU, system RAM, Oracle-Lite process RSS and disk telemetry.
+- Live in-browser logs plus persistent JSONL logs.
+- Final run-state JSON under `output_dir/logs/`.
+- Automatic localhost port fallback when 7860 is occupied.
+
+### Configuration
+No configuration keys were added. User configuration remains exactly:
+- `minimax_api_key`
+- `corpus_dir`
+- `output_dir`
+
+### Failure behavior
+- Web/system telemetry failures do not abort training.
+- Training/data failures are displayed in the Web console and persisted in the final state report.
+
 ## 0.3.0 - 2026-09-28
 
 ### Added
