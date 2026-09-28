@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .base import ParsedDocument, ParsedSegment
+
 
 def _flatten_json(value: Any, prefix: str = "") -> list[str]:
     lines: list[str] = []
@@ -20,7 +22,7 @@ def _flatten_json(value: Any, prefix: str = "") -> list[str]:
     return lines
 
 
-def parse_json_like(path: Path) -> tuple[str, str, dict]:
+def parse_json_like(path: Path) -> ParsedDocument:
     ext = path.suffix.lower()
     title = path.stem
 
@@ -35,15 +37,20 @@ def parse_json_like(path: Path) -> tuple[str, str, dict]:
                 records.append(json.loads(line))
             except json.JSONDecodeError:
                 invalid += 1
-        text_blocks = ["\n".join(_flatten_json(record)) for record in records]
-        return title, "\n\n--- record ---\n\n".join(text_blocks), {
-            "extension": ext,
-            "records": len(records),
-            "invalid_lines": invalid,
-        }
+        blocks = ["\n".join(_flatten_json(record)) for record in records]
+        text = "\n\n--- record ---\n\n".join(blocks)
+        return ParsedDocument(
+            title=title,
+            text=text,
+            segments=[ParsedSegment(text=block, metadata={"record_index": i}) for i, block in enumerate(blocks)],
+            metadata={"extension": ext, "records": len(records), "invalid_lines": invalid},
+        )
 
     raw = json.loads(path.read_text(encoding="utf-8-sig"))
-    return title, "\n".join(_flatten_json(raw)), {
-        "extension": ext,
-        "root_type": type(raw).__name__,
-    }
+    text = "\n".join(_flatten_json(raw))
+    return ParsedDocument(
+        title=title,
+        text=text,
+        segments=[ParsedSegment(text=text)],
+        metadata={"extension": ext, "root_type": type(raw).__name__},
+    )
