@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.3 - 2026-09-28
+
+### Added
+- Linux/Ubuntu memory-heavy commands now run inside a fail-closed per-user systemd/cgroup scope.
+- The cgroup receives an OS-enforced `MemoryMax` equal to host RAM minus the reserved OS margin.
+- The cgroup receives a `MemorySwapMax` of roughly 512 MiB.
+- If the user systemd scope cannot be established, Oracle-Lite refuses to continue unguarded.
+- The Web Training Console displays the cgroup RAM and swap hard caps.
+
+### Memory invariant
+- Application watchdogs and parser `RLIMIT_AS` remain in place as additional layers.
+- OS protection has priority over completing a file, step, or training run.
+- User configuration remains exactly three fields.
+
 ## 0.4.2 - 2026-09-28
 
 ### Fixed
