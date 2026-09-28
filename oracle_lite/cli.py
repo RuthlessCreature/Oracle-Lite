@@ -14,7 +14,7 @@ from .dashboard import MonitorLoggingHandler, TrainingDashboard, TrainingMonitor
 from .dataset import build_domain_dataset
 from .db import Registry
 from .ingest import ingest_corpus
-from .memory import HostMemoryWatchdog, MemoryPolicy
+from .memory import HostMemoryWatchdog, MemoryPolicy, ensure_linux_memory_scope
 from .models import DEFAULT_BASE_MODEL_ID, ensure_base_model
 from .pipeline import run_one_click
 from .scanner import scan_corpus
@@ -27,6 +27,12 @@ app = typer.Typer(
     help="Local-first multimodal dataset factory and domain-model training pipeline.",
 )
 console = Console()
+
+
+def _enter_hard_memory_scope() -> MemoryPolicy:
+    policy = MemoryPolicy.auto()
+    ensure_linux_memory_scope(policy)
+    return policy
 
 
 @app.command()
@@ -63,6 +69,7 @@ def ingest(
     force: bool = typer.Option(False, help="Re-parse even if canonical artifact already exists"),
 ):
     """Parse source files into text + visual canonical artifacts."""
+    _enter_hard_memory_scope()
     stats = ingest_corpus(load_config(config), force=force)
     console.print_json(json.dumps(stats.as_dict()))
 
@@ -101,6 +108,7 @@ def build_domain(
     max_records_per_shard: int = typer.Option(2000),
 ):
     """Build mixed text + image/text domain-adaptation JSONL."""
+    _enter_hard_memory_scope()
     result = build_domain_dataset(
         load_config(config),
         snapshot_id=snapshot_id,
@@ -126,6 +134,7 @@ def prepare(
     verify_all: bool = typer.Option(False, help="Force SHA-256 verification for every source file"),
 ):
     """Run scan -> multimodal ingest -> snapshot -> domain dataset build."""
+    _enter_hard_memory_scope()
     cfg = load_config(config)
     scan_stats = scan_corpus(cfg, verify_all=verify_all)
     ingest_stats = ingest_corpus(cfg)
@@ -173,6 +182,7 @@ def train(
     max_steps: int | None = typer.Option(None, help="Optional smoke-test cap"),
 ):
     """Manual snapshot training with the same auto-opened Web console."""
+    memory_policy = _enter_hard_memory_scope()
     cfg = load_config(config)
     monitor = TrainingMonitor(cfg.output_dir)
     dashboard = TrainingDashboard(monitor)
@@ -182,7 +192,6 @@ def train(
 
     url = dashboard.start()
     console.print(f"[cyan]Oracle-Lite Training Console[/cyan] {url}")
-    memory_policy = MemoryPolicy.auto()
     watchdog = HostMemoryWatchdog(
         reserve_bytes=memory_policy.reserve_system_bytes,
         log_dir=cfg.logs_dir,
@@ -236,6 +245,7 @@ def run(
     ),
 ):
     """One command with auto-opened local Web console and full telemetry."""
+    memory_policy = _enter_hard_memory_scope()
     cfg = load_config(config)
     monitor = TrainingMonitor(cfg.output_dir)
     dashboard = TrainingDashboard(monitor)
@@ -245,7 +255,6 @@ def run(
 
     url = dashboard.start()
     console.print(f"[cyan]Oracle-Lite Training Console[/cyan] {url}")
-    memory_policy = MemoryPolicy.auto()
     watchdog = HostMemoryWatchdog(
         reserve_bytes=memory_policy.reserve_system_bytes,
         log_dir=cfg.logs_dir,
