@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.4 - 2026-09-28
+
+- Reworked multimodal collation for Qwen3.5-9B-Base so it no longer depends on a processor chat template.
+- Visual samples now use Qwen's base-native raw multimodal placeholder sequence and call `processor(text=..., images=...)` directly.
+- Prompt masking is still preserved: the image/instruction prefix is masked and loss is applied only to the source-grounded target text.
+- The temporary prompt batch is released before the full training batch is built to keep CPU memory bounded.
+- Added tests that lock the Base-model multimodal prompt contract and prevent accidental reintroduction of `apply_chat_template()`.
+
 ## 0.5.3 - 2026-09-28
 
 - Added a signature-aware Transformers TrainingArguments compatibility layer.
