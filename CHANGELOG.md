@@ -4,16 +4,19 @@
 
 ### Fixed
 - Corpus parsing now runs one source file per isolated worker process.
-- Parser-worker RSS and system available RAM are monitored continuously; unsafe workers are terminated before exhausting the workstation.
+- Parser-worker RSS and system available RAM are monitored continuously; unsafe workers are released and the same file is retried after RAM recovery.
 - Linux parser workers receive an OS-level `RLIMIT_AS` hard cap before opening source content.
-- `oracle-lite run` and `oracle-lite train` keep at least 25% / 12 GiB host RAM reserved and terminate immediately if RAM crosses that redline.
-- Swap growth above the startup baseline is capped at roughly 512 MiB; exceeding it triggers an emergency stop before swap thrashing can freeze the desktop.
+- `oracle-lite run` and `oracle-lite train` keep at least 25% / 12 GiB host RAM reserved. Crossing that redline pauses memory-heavy work instead of marking the source failed.
+- Swap growth is monitored and surfaced as pressure telemetry/warnings; parser work itself remains bounded by the host reserve plus the worker hard limit.
 - Canonical serialization no longer deep-copies the full document or constructs one giant JSON string.
 - Canonical segments are written to streamable JSONL sidecars and Dataset construction streams them line-by-line.
 - PDF parsing releases page/pixmap objects incrementally and avoids duplicate full-document text aggregation.
 - DOCX media extraction uses bounded streaming copy.
-- JSONL is read line-by-line; JSON/text outputs are chunked instead of building additional whole-document concatenations.
+- JSONL/text are streamed in bounded chunks. Under pressure, JSON is preserved through a raw streaming fallback instead of being materialized as one Python object.
 - Visual assets are isolated by parser version so V3 rebuilding cannot invalidate old snapshots.
+- Memory pressure uses `WAITING_FOR_MEMORY -> recover -> retry`, never a red failed artifact.
+- Repeated pressure progressively lowers PDF raster scale and switches Office/text/JSON to streaming fallback paths.
+- Multimodal Dataset records are capped at one image each to bound batch memory.
 
 ### Hash/cache behavior
 - Existing SHA-256 values are preserved across this upgrade.
