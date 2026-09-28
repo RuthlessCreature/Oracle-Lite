@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from oracle_lite.config import AppConfig
+from oracle_lite.canonical import CanonicalDocument
 from oracle_lite.ingest import ingest_corpus
 from oracle_lite.scanner import scan_corpus
 
@@ -60,10 +61,11 @@ END-ISO-10303-21;
     assert len(originals) == 1
     canonical = list(cfg.canonical_dir.rglob("*.json"))
     assert len(canonical) == 1
-    text = canonical[0].read_text(encoding="utf-8")
-    assert "CONFIG_CONTROL_DESIGN" in text
-    assert "CARTESIAN_POINT" in text
-    assert "geometry_preserved" in text
+    header = CanonicalDocument.read_header(canonical[0])
+    segment_text = "\n".join(s.text for s in CanonicalDocument.iter_segments(canonical[0]))
+    assert "CONFIG_CONTROL_DESIGN" in segment_text
+    assert "CARTESIAN_POINT" in segment_text
+    assert header["metadata"]["geometry_preserved"] is True
 
 
 def test_parasolid_extensions_are_scanned(tmp_path: Path):
