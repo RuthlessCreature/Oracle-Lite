@@ -3,7 +3,14 @@ import sys
 
 import pytest
 
-from oracle_lite.memory import GIB, MIB, MemoryPolicy
+from oracle_lite.memory import (
+    GIB,
+    MIB,
+    MEMORY_SCOPE_ENV,
+    MemoryPolicy,
+    build_systemd_memory_scope_command,
+    ensure_linux_memory_scope,
+)
 
 
 def test_auto_memory_policy_keeps_conservative_system_reserve_and_worker_cap():
@@ -16,6 +23,8 @@ def test_auto_memory_policy_keeps_conservative_system_reserve_and_worker_cap():
     assert policy.max_worker_rss_bytes < policy.total_bytes
     assert policy.max_worker_address_space_bytes < policy.total_bytes
     assert policy.max_swap_growth_bytes == 512 * MIB
+    assert policy.cgroup_memory_max_bytes == policy.total_bytes - policy.reserve_system_bytes
+    assert policy.cgroup_swap_max_bytes == 512 * MIB
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="RLIMIT_AS is a Linux safety guard")
@@ -40,3 +49,33 @@ except MemoryError:
     assert "limit True" in proc.stdout
     assert "blocked" in proc.stdout
     assert "unexpected-allocation" not in proc.stdout
+
+
+def test_systemd_scope_command_contains_hard_memory_limits(monkeypatch):
+    import oracle_lite.memory as memory
+
+    monkeypatch.setattr(
+        memory.shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}",
+    )
+    monkeypatch.setattr(memory.sys, "executable", "/tmp/venv/bin/python")
+
+    policy = MemoryPolicy.auto()
+    command = build_systemd_memory_scope_command(
+        policy,
+        argv=["run", "--max-steps", "10"],
+    )
+
+    assert command[0] == "/usr/bin/systemd-run"
+    assert "--user" in command
+    assert "--scope" in command
+    assert f"MemoryMax={policy.cgroup_memory_max_bytes}" in command
+    assert f"MemorySwapMax={policy.cgroup_swap_max_bytes}" in command
+    assert f"{MEMORY_SCOPE_ENV}=1" in command
+    assert command[-3:] == ["run", "--max-steps", "10"]
+
+
+def test_existing_scope_marker_prevents_recursive_reexec(monkeypatch):
+    monkeypatch.setenv(MEMORY_SCOPE_ENV, "1")
+    assert ensure_linux_memory_scope(MemoryPolicy.auto(), argv=["run"]) is False
