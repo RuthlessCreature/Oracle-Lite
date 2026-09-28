@@ -108,6 +108,42 @@ def build_cpt(
     }))
 
 
+@app.command()
+def prepare(
+    name: str = typer.Option("snapshot", help="Snapshot name"),
+    config: Path = typer.Option(Path("oracle.yaml")),
+    mode: str = typer.Option("full", help="full or incremental"),
+    base: str | None = typer.Option(None, help="Base snapshot id for incremental mode"),
+    replay_ratio: float = typer.Option(0.20, help="Historical replay fraction for incremental mode"),
+    verify_all: bool = typer.Option(False, help="Force SHA-256 verification for every source file"),
+):
+    """Run scan -> ingest -> snapshot -> CPT dataset build in one command."""
+    cfg = load_config(config)
+    scan_stats = scan_corpus(cfg, verify_all=verify_all)
+    ingest_stats = ingest_corpus(cfg)
+    snap = create_snapshot(
+        cfg,
+        name=name,
+        mode=mode,
+        base_snapshot_id=base,
+        history_replay_ratio=replay_ratio,
+        seed=42,
+    )
+    dataset = build_cpt_dataset(cfg, snapshot_id=snap.snapshot_id)
+
+    console.print_json(json.dumps({
+        "scan": scan_stats.as_dict(),
+        "ingest": ingest_stats.as_dict(),
+        "snapshot_id": snap.snapshot_id,
+        "snapshot_total": snap.total,
+        "snapshot_current": snap.current,
+        "snapshot_replay": snap.replay,
+        "dataset_dir": str(dataset.output_dir),
+        "documents": dataset.documents,
+        "characters": dataset.characters,
+    }))
+
+
 @app.command("train-cpt")
 def train_cpt(
     snapshot_id: str = typer.Argument(..., help="Snapshot whose CPT dataset should be trained"),
