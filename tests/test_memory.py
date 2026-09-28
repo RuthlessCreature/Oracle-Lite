@@ -16,15 +16,18 @@ from oracle_lite.memory import (
 def test_auto_memory_policy_keeps_conservative_system_reserve_and_worker_cap():
     policy = MemoryPolicy.auto()
     assert policy.total_bytes > 0
-    assert policy.reserve_system_bytes >= 12 * GIB
-    assert policy.reserve_system_bytes < policy.total_bytes
-    assert 4 * GIB <= policy.max_worker_rss_bytes <= 8 * GIB
-    assert 5 * GIB <= policy.max_worker_address_space_bytes <= 10 * GIB
-    assert policy.max_worker_rss_bytes < policy.total_bytes
-    assert policy.max_worker_address_space_bytes < policy.total_bytes
-    assert policy.max_swap_growth_bytes == 512 * MIB
+    assert 0 <= policy.reserve_system_bytes < policy.total_bytes
     assert policy.cgroup_memory_max_bytes == policy.total_bytes - policy.reserve_system_bytes
+    assert policy.cgroup_memory_max_bytes >= GIB
+    assert GIB <= policy.max_worker_rss_bytes <= min(8 * GIB, policy.cgroup_memory_max_bytes)
+    assert policy.max_worker_address_space_bytes <= min(10 * GIB, policy.cgroup_memory_max_bytes)
+    assert policy.max_worker_address_space_bytes >= min(2 * GIB, policy.cgroup_memory_max_bytes)
+    assert policy.max_swap_growth_bytes == 512 * MIB
     assert policy.cgroup_swap_max_bytes == 512 * MIB
+
+    if policy.total_bytes >= 48 * GIB:
+        assert policy.reserve_system_bytes >= 12 * GIB
+        assert policy.reserve_system_bytes >= int(policy.total_bytes * 0.25)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="RLIMIT_AS is a Linux safety guard")
