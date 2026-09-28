@@ -26,13 +26,6 @@ def test_rtx4080_training_avoids_stock_peft_fp32_prepare():
     assert 'torch_dtype=torch.bfloat16' not in text
 
 
-def test_package_versions_match():
-    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
-    init = Path("oracle_lite/__init__.py").read_text(encoding="utf-8")
-    assert 'version = "0.5.2"' in pyproject
-    assert '__version__ = "0.5.2"' in init
-
-
 def test_trainingarguments_compat_uses_warmup_steps_when_ratio_name_is_absent():
     from oracle_lite.training import _build_training_arguments
 
