@@ -118,6 +118,13 @@ def run_one_click(
     scan_stats = scan_corpus(cfg, verify_all=verify_all)
     ingest_stats = ingest_corpus(cfg)
 
+    if ingest_stats.failed:
+        raise RuntimeError(
+            f"{ingest_stats.failed} active corpus file(s) failed parsing. "
+            "Oracle-Lite will not silently train on a partial corpus. "
+            "Run 'oracle-lite ingest' to inspect/retry after fixing the source files."
+        )
+
     registry = Registry(cfg.registry_path)
     active_hashes = registry.active_ready_hashes(cfg.parser_version)
     if not active_hashes:
