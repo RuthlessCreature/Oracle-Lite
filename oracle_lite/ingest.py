@@ -87,7 +87,7 @@ def ingest_corpus(
             / content_hash[:2]
             / f"{content_hash}.{cfg.parser_version}.json"
         ).resolve()
-        asset_dir = (cfg.assets_dir / content_hash[:2] / content_hash).resolve()
+        asset_dir = (cfg.assets_dir / content_hash[:2] / content_hash / cfg.parser_version).resolve()
 
         gc.collect()
         available = int(psutil.virtual_memory().available)
