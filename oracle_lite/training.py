@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import math
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -31,9 +32,10 @@ RTX4080_16GB_MULTIMODAL_PRESET = {
     "lora_alpha": 16,
     "lora_dropout": 0.05,
     "target_modules": "all-linear",
+    "exclude_modules": r".*(?:visual|vision).*",
     "text_max_length": 2048,
     "visual_text_max_chars": 4000,
-    "vision_max_pixels": 786_432,
+    "vision_max_pixels": 393_216,
     "micro_batch_size": 1,
     "gradient_accumulation_steps": 32,
     "gradient_checkpointing": True,
@@ -53,6 +55,44 @@ RTX4080_16GB_MULTIMODAL_PRESET = {
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _prepare_kbit_model_memory_safe(
+    model,
+    *,
+    use_gradient_checkpointing: bool,
+):
+    """Prepare a quantized base model without PEFT's bulk BF16/FP16 -> FP32 cast.
+
+    The stock PEFT helper intentionally promotes non-4-bit parameters to FP32.
+    Qwen3.5-9B includes a sizeable BF16 vision tower, so that promotion can need
+    several additional GiB on a 16 GiB RTX 4080. Oracle-Lite freezes the base
+    model anyway, so keep frozen base parameters in their loaded dtype and only
+    enable the gradient plumbing needed by LoRA.
+    """
+    for parameter in model.parameters():
+        parameter.requires_grad = False
+
+    if use_gradient_checkpointing:
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+        else:
+            embeddings = model.get_input_embeddings()
+
+            def _require_grad(_module, _inputs, output):
+                if hasattr(output, "requires_grad_"):
+                    output.requires_grad_(True)
+
+            embeddings.register_forward_hook(_require_grad)
+
+        try:
+            model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+        except TypeError:
+            model.gradient_checkpointing_enable()
+
+    return model
 
 
 class MultimodalDomainCollator:
@@ -141,11 +181,17 @@ def run_domain_training(
     monitor=None,
 ) -> str:
     """Train with streaming data and RAM/disk/VRAM admission control."""
+    # PyTorch 2.14 prefers PYTORCH_ALLOC_CONF; expandable segments reduce
+    # allocator fragmentation for changing multimodal activation sizes.
+    os.environ.setdefault(
+        "PYTORCH_ALLOC_CONF",
+        "expandable_segments:True,garbage_collection_threshold:0.80",
+    )
     try:
         import torch
         import torchvision  # noqa: F401 - required by Qwen3.5 visual/video processor
         from datasets import load_dataset
-        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        from peft import LoraConfig, get_peft_model
         from transformers import (
             AutoModelForMultimodalLM,
             AutoProcessor,
@@ -497,7 +543,7 @@ def run_domain_training(
                     device_map="auto",
                     low_cpu_mem_usage=True,
                     max_memory={0: "12GiB", "cpu": "12GiB"},
-                    torch_dtype=torch.bfloat16,
+                    dtype=torch.bfloat16,
                     trust_remote_code=cfg["trust_remote_code"],
                 )
                 break
@@ -540,7 +586,18 @@ def run_domain_training(
                 )
 
         model.config.use_cache = False
-        model = prepare_model_for_kbit_training(
+        _vram_gate(
+            "adapter_prepare",
+            "Preparing memory-safe QLoRA adapters",
+            required_free_bytes=policy.gpu_step_reserve_bytes,
+        )
+        if monitor is not None:
+            monitor.update_phase(
+                "adapter_prepare",
+                "Preparing memory-safe QLoRA adapters",
+            )
+
+        model = _prepare_kbit_model_memory_safe(
             model,
             use_gradient_checkpointing=cfg["gradient_checkpointing"],
         )
@@ -552,14 +609,43 @@ def run_domain_training(
                 lora_dropout=cfg["lora_dropout"],
                 bias="none",
                 target_modules=cfg["target_modules"],
+                exclude_modules=cfg["exclude_modules"],
                 task_type="CAUSAL_LM",
             ),
+            autocast_adapter_dtype=False,
         )
 
+        trainable = []
+        forbidden_visual_trainables = []
         for name, parameter in model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            trainable.append(name)
             lowered = name.lower()
             if "visual" in lowered or "vision" in lowered:
-                parameter.requires_grad = False
+                forbidden_visual_trainables.append(name)
+
+        if not trainable:
+            raise RuntimeError("LoRA adapter injection produced no trainable parameters")
+        if forbidden_visual_trainables:
+            raise RuntimeError(
+                "Vision LoRA exclusion failed; refusing to train visual adapters on the "
+                f"RTX4080 preset: {forbidden_visual_trainables[:5]}"
+            )
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        if monitor is not None:
+            monitor.update("model", {
+                "trainable_parameter_tensors": len(trainable),
+                "adapter_dtype_autocast": False,
+                "vision_lora_excluded": True,
+            })
+            monitor.log(
+                "INFO",
+                "Memory-safe QLoRA preparation completed",
+                trainable_parameter_tensors=len(trainable),
+            )
 
         if monitor is not None:
             monitor.update_phase("dataset_stream", "Opening streaming JSONL dataset")
@@ -605,7 +691,7 @@ def run_domain_training(
             )
 
         oom_level = 0
-        oom_pixel_budgets = [786_432, 524_288, 393_216, 262_144]
+        oom_pixel_budgets = [393_216, 262_144, 196_608, 131_072]
         oom_text_lengths = [2048, 1536, 1024, 768]
         oom_visual_chars = [4000, 3000, 2000, 1200]
 
@@ -670,7 +756,7 @@ def run_domain_training(
                     "base_model_id": DEFAULT_BASE_MODEL_ID,
                     "base_model_path": str(model_path),
                     "dataset": dataset_meta,
-                    "preset": "rtx4080_16gb_qwen35_multimodal_v2_no_kill",
+                    "preset": "rtx4080_16gb_qwen35_multimodal_v3_safe_kbit",
                     "preset_values": cfg,
                     "smoke_test": max_steps is not None,
                     "streaming_dataset": True,
