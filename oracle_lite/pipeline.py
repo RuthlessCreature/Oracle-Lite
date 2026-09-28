@@ -135,9 +135,29 @@ def run_one_click(
     ingest_progress = None
     if monitor is not None:
         monitor.update_phase("ingest", "Parsing multimodal corpus")
+        memory_paused = False
 
         def ingest_progress(payload: dict[str, Any]) -> None:
+            nonlocal memory_paused
             monitor.update("corpus", payload)
+            state = payload.get("parse_state")
+            if state == "waiting_for_memory" and not memory_paused:
+                memory_paused = True
+                monitor.update_phase(
+                    "waiting_for_memory",
+                    "Waiting for memory to recover",
+                    status="paused",
+                )
+            elif (
+                memory_paused
+                and state in {"starting", "starting_low_memory", "parsing", "parsing_low_memory"}
+            ):
+                memory_paused = False
+                monitor.update_phase(
+                    "ingest",
+                    "Parsing multimodal corpus",
+                    status="running",
+                )
 
     ingest_stats = ingest_corpus(cfg, progress=ingest_progress)
     if monitor is not None:

@@ -161,7 +161,7 @@ That single command performs:
 read 3-field config
 -> scan/hash corpus
 -> parse only new/changed content
--> fail if any active file cannot be parsed
+-> pause/retry on memory pressure; fail only on genuine parser/content errors
 -> freeze/reuse a full current-corpus snapshot
 -> build/reuse the multimodal domain dataset
 -> auto-download Qwen/Qwen3.5-9B-Base if missing
@@ -225,9 +225,9 @@ If NVML/GPU telemetry is unavailable, GPU monitoring degrades gracefully and tra
 
 ### Memory safety during corpus parsing
 
-Each source file is parsed in an isolated worker process. On Linux, the worker receives an OS-level `RLIMIT_AS` hard address-space cap before it opens source content. Oracle-Lite also keeps a conservative host-RAM reserve (at least 25% / 12 GiB, whichever is larger), monitors parser-worker RSS, and allows only about 512 MiB of additional swap growth during a run. If any redline is crossed, the worker or Oracle-Lite itself is terminated immediately rather than allowing the workstation to become unresponsive.
+Each source file is parsed in an isolated worker process. On Linux, the worker receives an OS-level `RLIMIT_AS` hard address-space cap before it opens source content. Oracle-Lite also keeps a conservative host-RAM reserve (at least 25% / 12 GiB, whichever is larger), monitors parser-worker RSS, and allows only about 512 MiB of additional swap growth during a run. If RAM pressure crosses a redline, Oracle-Lite releases the current parser worker, enters `WAITING_FOR_MEMORY`, waits for RAM to recover above a higher resume threshold, and retries the same file. Memory pressure is not recorded as a failed artifact. Parser workers still keep a Linux `RLIMIT_AS` hard ceiling so one file cannot allocate the whole workstation.
 
-Canonical segments are stored in streamable JSONL sidecars, and Dataset construction reads both snapshot manifests and Canonical segments line-by-line. PDF page objects are released as they are rasterized; DOCX media extraction and text/JSONL readers use bounded streaming where possible.
+Canonical segments are stored in streamable JSONL sidecars, and Dataset construction reads both snapshot manifests and Canonical segments line-by-line. PDF page objects are released as they are rasterized; DOCX media extraction and text/JSONL readers use bounded streaming where possible. If a file repeatedly triggers pressure, Oracle-Lite switches to a lower-memory fallback: raw text/JSON streaming, incremental Office XML extraction, or progressively lower PDF raster scale. Multi-image source segments are expanded to one image per training record.
 
 ## Advanced/manual commands
 

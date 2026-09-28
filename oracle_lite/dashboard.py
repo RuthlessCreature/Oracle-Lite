@@ -154,6 +154,11 @@ class TrainingMonitor:
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             state = copy.deepcopy(self._state)
+            # Elapsed time is lifecycle-wide, not Trainer-only. This keeps the
+            # dashboard alive during scan/ingest/model download as well.
+            state.setdefault("training", {})["elapsed_seconds"] = max(
+                0, int(time.monotonic() - self._started_monotonic)
+            )
             state["logs"] = list(self._logs)
             state["log_file"] = str(self.log_path)
             return state

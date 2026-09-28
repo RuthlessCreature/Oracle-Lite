@@ -186,12 +186,13 @@ def train(
     watchdog = HostMemoryWatchdog(
         reserve_bytes=memory_policy.reserve_system_bytes,
         log_dir=cfg.logs_dir,
-        on_warning=lambda message: monitor.log("ERROR", message),
+        on_warning=lambda message: monitor.log("WARNING", message),
         max_swap_growth_bytes=memory_policy.max_swap_growth_bytes,
     )
     watchdog.start()
     monitor.update("system", {
         "memory_reserve_gb": round(memory_policy.reserve_system_bytes / (1024 ** 3), 2),
+        "memory_resume_gb": round(memory_policy.resume_system_bytes / (1024 ** 3), 2),
         "parser_worker_rss_cap_gb": round(memory_policy.max_worker_rss_bytes / (1024 ** 3), 2),
         "parser_worker_as_cap_gb": round(memory_policy.max_worker_address_space_bytes / (1024 ** 3), 2),
         "max_swap_growth_gb": round(memory_policy.max_swap_growth_bytes / (1024 ** 3), 2),
@@ -249,7 +250,7 @@ def run(
     watchdog = HostMemoryWatchdog(
         reserve_bytes=memory_policy.reserve_system_bytes,
         log_dir=cfg.logs_dir,
-        on_warning=lambda message: monitor.log("ERROR", message),
+        on_warning=lambda message: monitor.log("WARNING", message),
         max_swap_growth_bytes=memory_policy.max_swap_growth_bytes,
     )
     watchdog.start()

@@ -13,7 +13,7 @@ import psutil
 from .config import AppConfig
 from .db import Registry
 from .ingest_worker import parse_and_write_canonical
-from .memory import GIB, MemoryPolicy, process_tree_rss
+from .memory import GIB, MemoryPolicy, process_tree_rss, wait_for_safe_memory
 
 
 IngestProgress = Callable[[dict[str, Any]], None]
@@ -24,6 +24,8 @@ class IngestStats:
     ready: int = 0
     skipped: int = 0
     failed: int = 0
+    memory_pauses: int = 0
+    memory_retries: int = 0
     visual_documents: int = 0
     visual_segments: int = 0
 
@@ -32,6 +34,8 @@ class IngestStats:
             "ready": self.ready,
             "skipped": self.skipped,
             "failed": self.failed,
+            "memory_pauses": self.memory_pauses,
+            "memory_retries": self.memory_retries,
             "visual_documents": self.visual_documents,
             "visual_segments": self.visual_segments,
         }
@@ -43,12 +47,12 @@ def ingest_corpus(
     force: bool = False,
     progress: IngestProgress | None = None,
 ) -> IngestStats:
-    """Parse corpus safely, one isolated source process at a time.
+    """Parse corpus with backpressure instead of host-RAM exhaustion.
 
-    A pathological PDF/PPT/JSON can no longer consume the entire workstation:
-    each source is parsed in a child process whose RSS is monitored. If either
-    the worker exceeds its internal budget or system available memory falls
-    below the reserved safety margin, only that worker is terminated.
+    Memory pressure is never recorded as a failed artifact. The current worker is
+    released, the pipeline enters WAITING_FOR_MEMORY, and the same file is retried
+    after host RAM has recovered. A low-memory parser mode is enabled after the
+    first memory-pressure restart.
     """
     registry = Registry(cfg.registry_path)
     stats = IngestStats()
@@ -62,6 +66,21 @@ def ingest_corpus(
         payload.update(policy.as_dict())
         payload.update(extra)
         progress(payload)
+
+    def wait_memory(source_path: Path, reason: str, attempt: int) -> None:
+        stats.memory_pauses += 1
+
+        def on_wait(state: dict) -> None:
+            emit(
+                current_parse_file=str(source_path),
+                parse_state="waiting_for_memory",
+                memory_reason=reason,
+                retry_attempt=attempt,
+                worker_rss_gb=0.0,
+                memory_available_gb=state["available_gb"],
+            )
+
+        wait_for_safe_memory(policy, on_wait=on_wait, poll_seconds=1.0, stable_samples=3)
 
     emit(stage="ingest_start")
 
@@ -87,164 +106,190 @@ def ingest_corpus(
             / content_hash[:2]
             / f"{content_hash}.{cfg.parser_version}.json"
         ).resolve()
-        asset_dir = (cfg.assets_dir / content_hash[:2] / content_hash / cfg.parser_version).resolve()
+        asset_dir = (
+            cfg.assets_dir
+            / content_hash[:2]
+            / content_hash
+            / cfg.parser_version
+        ).resolve()
 
-        gc.collect()
-        available = int(psutil.virtual_memory().available)
-        if available < policy.reserve_system_bytes:
-            error = (
-                "MemoryPressureError: available system memory "
-                f"{available / GIB:.2f} GB is below Oracle-Lite reserve "
-                f"{policy.reserve_system_bytes / GIB:.2f} GB before parsing "
-                f"{source_path}"
-            )
-            registry.save_artifact(
-                content_hash=content_hash,
-                parser_version=cfg.parser_version,
-                canonical_path=None,
-                status="failed",
-                error=error,
-            )
-            stats.failed += 1
-            emit(
-                current_parse_file=str(source_path),
-                parse_state="memory_blocked",
-                worker_rss_gb=0.0,
-                memory_available_gb=round(available / GIB, 2),
-                error=error,
-            )
-            continue
+        attempt = 0
+        memory_level = 0
 
-        # Remove leftovers from an interrupted/failed previous parse. Canonical
-        # artifacts are immutable once marked ready, so this only affects work
-        # that never completed successfully.
-        tmp_path = canonical_path.with_suffix(canonical_path.suffix + ".tmp")
-        tmp_path.unlink(missing_ok=True)
-        if asset_dir.exists():
-            shutil.rmtree(asset_dir, ignore_errors=True)
+        while True:
+            attempt += 1
+            gc.collect()
 
-        result_queue = ctx.Queue(maxsize=1)
-        proc = ctx.Process(
-            target=parse_and_write_canonical,
-            kwargs={
-                "source_path": str(source_path),
-                "asset_dir": str(asset_dir),
-                "canonical_path": str(canonical_path),
-                "content_hash": content_hash,
-                "parser_version": cfg.parser_version,
-                "result_queue": result_queue,
-                "address_space_limit_bytes": policy.max_worker_address_space_bytes,
-            },
-            name=f"oracle-ingest-{content_hash[:8]}",
-        )
-
-        emit(
-            current_parse_file=str(source_path),
-            parse_state="starting",
-            worker_rss_gb=0.0,
-            memory_available_gb=round(available / GIB, 2),
-        )
-        proc.start()
-
-        memory_error: str | None = None
-        while proc.is_alive():
-            proc.join(timeout=0.20)
-            worker_rss = process_tree_rss(proc.pid or -1)
             available = int(psutil.virtual_memory().available)
-
-            emit(
-                current_parse_file=str(source_path),
-                parse_state="parsing",
-                worker_rss_gb=round(worker_rss / GIB, 2),
-                memory_available_gb=round(available / GIB, 2),
-            )
-
-            if worker_rss > policy.max_worker_rss_bytes:
-                memory_error = (
-                    "MemoryPressureError: parser worker exceeded safe RSS cap "
-                    f"({worker_rss / GIB:.2f} GB > "
-                    f"{policy.max_worker_rss_bytes / GIB:.2f} GB) while parsing "
-                    f"{source_path}"
-                )
-            elif available < policy.reserve_system_bytes:
-                memory_error = (
-                    "MemoryPressureError: system available memory fell below "
-                    f"reserve ({available / GIB:.2f} GB < "
-                    f"{policy.reserve_system_bytes / GIB:.2f} GB) while parsing "
-                    f"{source_path}"
+            if available < policy.resume_system_bytes:
+                wait_memory(
+                    source_path,
+                    (
+                        f"host RAM is below resume threshold "
+                        f"({available / GIB:.2f} GiB available)"
+                    ),
+                    attempt,
                 )
 
-            if memory_error:
-                proc.terminate()
-                proc.join(timeout=3.0)
-                if proc.is_alive():
-                    proc.kill()
-                    proc.join(timeout=1.0)
-                break
-
-        result: dict[str, Any] | None = None
-        if memory_error is None:
-            try:
-                result = result_queue.get(timeout=2.0)
-            except Empty:
-                result = None
-
-        try:
-            result_queue.close()
-            result_queue.join_thread()
-        except Exception:
-            pass
-
-        if memory_error is not None:
-            error = memory_error
-        elif result is None:
-            error = (
-                "ParserWorkerError: parser process exited without a result "
-                f"(exitcode={proc.exitcode}) for {source_path}"
+            tmp_path = canonical_path.with_suffix(canonical_path.suffix + ".tmp")
+            sidecar_tmp = canonical_path.with_suffix(
+                canonical_path.suffix + ".segments.jsonl.tmp"
             )
-        elif not result.get("ok"):
-            error = str(result.get("error") or "ParserWorkerError: unknown parser failure")
-        else:
-            error = None
-
-        if error is not None:
             tmp_path.unlink(missing_ok=True)
-            registry.save_artifact(
-                content_hash=content_hash,
-                parser_version=cfg.parser_version,
-                canonical_path=None,
-                status="failed",
-                error=error,
+            sidecar_tmp.unlink(missing_ok=True)
+            if asset_dir.exists():
+                shutil.rmtree(asset_dir, ignore_errors=True)
+
+            result_queue = ctx.Queue(maxsize=1)
+            proc = ctx.Process(
+                target=parse_and_write_canonical,
+                kwargs={
+                    "source_path": str(source_path),
+                    "asset_dir": str(asset_dir),
+                    "canonical_path": str(canonical_path),
+                    "content_hash": content_hash,
+                    "parser_version": cfg.parser_version,
+                    "result_queue": result_queue,
+                    "address_space_limit_bytes": policy.max_worker_address_space_bytes,
+                    "low_memory": memory_level > 0,
+                    "memory_level": memory_level,
+                },
+                name=f"oracle-ingest-{content_hash[:8]}",
             )
-            stats.failed += 1
+
             emit(
                 current_parse_file=str(source_path),
-                parse_state="failed",
+                parse_state="starting_low_memory" if memory_level > 0 else "starting",
+                retry_attempt=attempt,
+                low_memory_mode=memory_level > 0,
                 worker_rss_gb=0.0,
                 memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
-                error=error,
             )
-            continue
+            proc.start()
 
-        registry.save_artifact(
-            content_hash=content_hash,
-            parser_version=cfg.parser_version,
-            canonical_path=str(canonical_path),
-            status="ready",
-        )
-        stats.ready += 1
-        visual_segments = int(result.get("visual_segments", 0))
-        if visual_segments:
-            stats.visual_documents += 1
-            stats.visual_segments += visual_segments
+            memory_reason: str | None = None
+            while proc.is_alive():
+                proc.join(timeout=0.20)
+                worker_rss = process_tree_rss(proc.pid or -1)
+                available = int(psutil.virtual_memory().available)
 
-        emit(
-            current_parse_file=str(source_path),
-            parse_state="ready",
-            worker_rss_gb=0.0,
-            memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
-        )
-        gc.collect()
+                emit(
+                    current_parse_file=str(source_path),
+                    parse_state="parsing_low_memory" if memory_level > 0 else "parsing",
+                    retry_attempt=attempt,
+                    low_memory_mode=memory_level > 0,
+                    worker_rss_gb=round(worker_rss / GIB, 2),
+                    memory_available_gb=round(available / GIB, 2),
+                )
+
+                if worker_rss > policy.max_worker_rss_bytes:
+                    memory_reason = (
+                        f"parser RSS {worker_rss / GIB:.2f} GiB exceeded "
+                        f"{policy.max_worker_rss_bytes / GIB:.2f} GiB cap"
+                    )
+                elif available < policy.reserve_system_bytes:
+                    memory_reason = (
+                        f"host available RAM {available / GIB:.2f} GiB fell below "
+                        f"{policy.reserve_system_bytes / GIB:.2f} GiB reserve"
+                    )
+
+                if memory_reason:
+                    proc.terminate()
+                    proc.join(timeout=2.0)
+                    if proc.is_alive():
+                        proc.kill()
+                        proc.join(timeout=1.0)
+                    break
+
+            result: dict[str, Any] | None = None
+            if memory_reason is None:
+                try:
+                    result = result_queue.get(timeout=2.0)
+                except Empty:
+                    result = None
+
+            try:
+                result_queue.close()
+                result_queue.join_thread()
+            except Exception:
+                pass
+
+            worker_reported_memory = bool(
+                result
+                and not result.get("ok")
+                and result.get("kind") == "memory"
+            )
+
+            if memory_reason is not None or worker_reported_memory:
+                stats.memory_retries += 1
+                reason = memory_reason or str(result.get("error") if result else "memory pressure")
+                tmp_path.unlink(missing_ok=True)
+                sidecar_tmp.unlink(missing_ok=True)
+                shutil.rmtree(asset_dir, ignore_errors=True)
+                emit(
+                    current_parse_file=str(source_path),
+                    parse_state="deferred_memory",
+                    memory_reason=reason,
+                    retry_attempt=attempt,
+                    low_memory_mode=memory_level > 0,
+                    worker_rss_gb=0.0,
+                    memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
+                )
+
+                memory_level = min(3, memory_level + 1)
+                wait_memory(source_path, reason, attempt)
+                continue
+
+            if result is None:
+                stats.memory_retries += 1
+                reason = f"worker exited without result (exitcode={proc.exitcode})"
+                memory_level = min(3, memory_level + 1)
+                wait_memory(source_path, reason, attempt)
+                continue
+
+            if not result.get("ok"):
+                error = str(result.get("error") or "ParserWorkerError: unknown parser failure")
+                registry.save_artifact(
+                    content_hash=content_hash,
+                    parser_version=cfg.parser_version,
+                    canonical_path=None,
+                    status="failed",
+                    error=error,
+                )
+                stats.failed += 1
+                emit(
+                    current_parse_file=str(source_path),
+                    parse_state="failed",
+                    retry_attempt=attempt,
+                    low_memory_mode=memory_level > 0,
+                    worker_rss_gb=0.0,
+                    memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
+                    error=error,
+                )
+                break
+
+            registry.save_artifact(
+                content_hash=content_hash,
+                parser_version=cfg.parser_version,
+                canonical_path=str(canonical_path),
+                status="ready",
+            )
+            stats.ready += 1
+            visual_segments = int(result.get("visual_segments", 0))
+            if visual_segments:
+                stats.visual_documents += 1
+                stats.visual_segments += visual_segments
+
+            emit(
+                current_parse_file=str(source_path),
+                parse_state="ready",
+                retry_attempt=attempt,
+                low_memory_mode=memory_level > 0,
+                worker_rss_gb=0.0,
+                memory_available_gb=round(psutil.virtual_memory().available / GIB, 2),
+            )
+            gc.collect()
+            break
 
     emit(
         stage="ingest_complete",
