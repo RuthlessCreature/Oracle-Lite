@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.5 - 2026-09-28
+
+- Removed a stale `watchdog.stop()` cleanup reference from the real `oracle-lite run` path after the no-kill watchdog removal.
+- Added a regression test so the one-click CLI cannot silently reintroduce the removed watchdog symbol.
+
 ## 0.4.4 - 2026-09-28
 
 ### Hard resource safety

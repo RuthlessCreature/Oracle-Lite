@@ -277,7 +277,6 @@ def run(
         time.sleep(1.2)
         raise
     finally:
-        watchdog.stop()
         logging.getLogger().removeHandler(log_handler)
         dashboard.stop()
 
