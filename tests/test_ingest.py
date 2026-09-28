@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from oracle_lite.canonical import CanonicalDocument
 from oracle_lite.config import AppConfig
 from oracle_lite.db import Registry
 from oracle_lite.ingest import ingest_corpus
@@ -31,6 +32,11 @@ def test_json_ingestion_creates_traceable_canonical_artifact(tmp_path: Path):
     artifact = registry.get_artifact(row["content_hash"], cfg.parser_version)
     assert artifact["status"] == "ready"
 
-    canonical = json.loads(Path(artifact["canonical_path"]).read_text(encoding="utf-8"))
-    assert canonical["content_hash"] == row["content_hash"]
-    assert "alarm_code: E102" in canonical["text"]
+    canonical_path = Path(artifact["canonical_path"])
+    header = json.loads(canonical_path.read_text(encoding="utf-8"))
+    assert header["content_hash"] == row["content_hash"]
+    assert header["segments_path"]
+    assert Path(header["segments_path"]).exists()
+
+    canonical = CanonicalDocument.read_json(canonical_path)
+    assert any("alarm_code: E102" in segment.text for segment in canonical.segments)
