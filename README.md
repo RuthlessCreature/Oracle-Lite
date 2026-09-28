@@ -2,7 +2,7 @@
 
 Local-first **multimodal** dataset factory and domain-model training pipeline.
 
-Oracle-Lite V0.2 is built around these fixed assumptions:
+Oracle-Lite V0.3 is built around these fixed assumptions:
 
 - corpus files live in one continuously changing local folder;
 - text, images, PDF pages, Word media and PowerPoint media are first-class source material;
@@ -133,7 +133,7 @@ Training environment:
 pip install -e ".[train]"
 ```
 
-## First run
+## One-click run
 
 Create config:
 
@@ -141,22 +141,34 @@ Create config:
 oracle-lite init
 ```
 
-Put source files into `corpus_dir`, then:
+Put source files into `corpus_dir`, then run exactly:
 
 ```bash
-oracle-lite prepare --name initial
+oracle-lite run
 ```
 
-This executes:
+That single command performs:
 
 ```text
-scan
--> multimodal ingest
--> immutable snapshot
--> mixed domain dataset
+read 3-field config
+-> scan/hash corpus
+-> parse only new/changed content
+-> fail if any active file cannot be parsed
+-> freeze/reuse a full current-corpus snapshot
+-> build/reuse the multimodal domain dataset
+-> auto-download Qwen/Qwen3.5-9B-Base if missing
+-> train or resume from checkpoint
 ```
 
-It prints a `snapshot_id`.
+If the corpus has not changed and the current snapshot already completed a full training run, `oracle-lite run` returns `up_to_date` without retraining.
+
+For a short local GPU smoke test:
+
+```bash
+oracle-lite run --max-steps 10
+```
+
+A smoke run never marks the snapshot as fully trained.
 
 ## Base model download
 
@@ -182,21 +194,22 @@ output_dir/models/Qwen3.5-9B-Base/
 
 If the model is absent when training starts, Oracle-Lite downloads it automatically.
 
-## Train
+## Advanced/manual commands
 
-Smoke test:
+Normal use should be `oracle-lite run`.
 
-```bash
-oracle-lite train <snapshot_id> --max-steps 10
-```
-
-Full built-in run:
+The lower-level commands remain available for debugging or controlled experiments:
 
 ```bash
+oracle-lite scan
+oracle-lite ingest
+oracle-lite prepare --name manual
+oracle-lite build-domain <snapshot_id>
 oracle-lite train <snapshot_id>
+oracle-lite download-model
 ```
 
-V0.2 RTX 4080 policy:
+V0.3 RTX 4080 policy:
 
 - Qwen3.5-9B-Base;
 - 4-bit NF4;
@@ -213,18 +226,15 @@ V0.2 RTX 4080 policy:
 
 The vision tower is frozen for memory safety, not bypassed. Image inputs still traverse the native Qwen3.5 visual encoder.
 
-## Incremental update
+## Dynamic corpus updates
 
-After the corpus changes:
+After adding, modifying, deleting, moving or duplicating source files, simply run:
 
 ```bash
-oracle-lite prepare \
-  --name update-001 \
-  --mode incremental \
-  --base <previous_snapshot_id>
+oracle-lite run
 ```
 
-Hash identity handles duplicates and renames. New content is combined with deterministic historical replay. A running training job never reads the live corpus directly.
+Hash identity prevents duplicate parsing and treats renames/moves as the same content. The one-click path intentionally creates a **full current-corpus snapshot** whenever the active content set changes, then trains from the fixed Base model. This is slower than adapter chaining but materially safer and more reproducible on a single 4080. A running training job never reads the live corpus directly.
 
 ## Output layout
 
@@ -242,7 +252,7 @@ output_dir/
 └── logs/
 ```
 
-## Known V0.2 limits
+## Known V0.3 limits
 
 - scanned PDF pages are visually preserved but OCR is not yet used as a deterministic label source;
 - PPTX embedded raster images are preserved, but the entire slide is not rendered into one screenshot;

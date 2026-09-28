@@ -12,6 +12,7 @@ from .dataset import build_domain_dataset
 from .db import Registry
 from .ingest import ingest_corpus
 from .models import DEFAULT_BASE_MODEL_ID, ensure_base_model
+from .pipeline import run_one_click
 from .scanner import scan_corpus
 from .snapshot import create_snapshot
 from .training import run_domain_training
@@ -174,6 +175,36 @@ def train(
         max_steps=max_steps,
     )
     console.print(f"[green]Training completed[/green] run_id={run_id}")
+
+
+@app.command()
+def run(
+    config: Path = typer.Option(Path("oracle.yaml")),
+    max_steps: int | None = typer.Option(
+        None,
+        help="Optional smoke-test cap. Omit for a normal full one-click run.",
+    ),
+    verify_all: bool = typer.Option(
+        False,
+        help="Force SHA-256 verification for every source file before training.",
+    ),
+):
+    """One command: scan -> ingest -> snapshot -> dataset -> download model -> train/resume."""
+    cfg = load_config(config)
+    console.print("[cyan]Oracle-Lite[/cyan] checking corpus and training state...")
+    result = run_one_click(
+        cfg,
+        max_steps=max_steps,
+        verify_all=verify_all,
+    )
+    console.print_json(json.dumps(result.to_dict()))
+    if result.status == "up_to_date":
+        console.print("[green]Up to date[/green]: current corpus is already fully trained.")
+    else:
+        console.print(
+            f"[green]Done[/green]: status={result.status} "
+            f"snapshot={result.snapshot_id} run_id={result.run_id}"
+        )
 
 
 @app.command()
