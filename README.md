@@ -2,7 +2,7 @@
 
 Local-first **multimodal** dataset factory and domain-model training pipeline.
 
-Oracle-Lite V0.4.2 is built around these fixed assumptions:
+Oracle-Lite V0.4.4 is built around these fixed assumptions:
 
 - corpus files live in one continuously changing local folder;
 - text, images, PDF pages, Word media and PowerPoint media are first-class source material;
@@ -29,7 +29,7 @@ All parser settings, model ID, model download path, hashing, snapshot layout and
 
 Oracle-Lite always walks the corpus directory on startup so it can discover new, deleted or renamed files, but it does **not** recompute SHA-256 for unchanged files. If path, size and nanosecond mtime match the registry, the existing content hash is reused immediately.
 
-After upgrading to V0.4.2, existing hashes are still reused. The parser version changes to `v3-memory-safe`, so existing sources are parsed once into the new memory-safe Canonical format; subsequent runs reuse those Canonical artifacts too.
+After upgrading to V0.4.4, existing SHA-256 values are still reused. The parser version is `v4-resource-admission`, so existing sources are reparsed once into the bounded Canonical format; subsequent runs reuse those Canonical artifacts too.
 
 ## What is multimodal here?
 
@@ -223,11 +223,39 @@ The server binds to localhost only. Runtime logs are also persisted under `outpu
 
 If NVML/GPU telemetry is unavailable, GPU monitoring degrades gracefully and training continues.
 
-### Memory safety during corpus parsing
+### Hard resource redlines: delay, never resource-kill
 
-Each source file is parsed in an isolated worker process. On Linux, the worker receives an OS-level `RLIMIT_AS` hard address-space cap before it opens source content. Oracle-Lite also keeps a conservative host-RAM reserve (at least 25% / 12 GiB, whichever is larger), monitors parser-worker RSS, and allows only about 512 MiB of additional swap growth during a run. If RAM pressure crosses a redline, Oracle-Lite releases the current parser worker, enters `WAITING_FOR_MEMORY`, waits for RAM to recover above a higher resume threshold, and retries the same file. Memory pressure is not recorded as a failed artifact. Parser workers still keep a Linux `RLIMIT_AS` hard ceiling so one file cannot allocate the whole workstation.
+Oracle-Lite V0.4.4 uses **admission control**. Resource pressure is handled before the next heavy operation starts.
 
-Canonical segments are stored in streamable JSONL sidecars, and Dataset construction reads both snapshot manifests and Canonical segments line-by-line. PDF page objects are released as they are rasterized; DOCX media extraction and text/JSONL readers use bounded streaming where possible. If a file repeatedly triggers pressure, Oracle-Lite switches to a lower-memory fallback: raw text/JSON streaming, incremental Office XML extraction, or progressively lower PDF raster scale. Multi-image source segments are expanded to one image per training record.
+**RAM**
+- On a ~64 GiB Ubuntu host, Oracle-Lite keeps roughly 19–20 GiB as an OS reserve.
+- A parser starts only after available RAM recovers to roughly 26 GiB.
+- Each parser worker receives a Linux `RLIMIT_AS` ceiling of roughly 6 GiB.
+- Oracle-Lite does not call `terminate()`, `kill()`, `SIGKILL` or `os.kill()` for resource pressure.
+- If an allocation is denied and the worker reports `MemoryError`, the file is retried with a lower-footprint streaming parser; it is not marked failed because of memory pressure.
+
+**Disk**
+- A large fixed/percentage reserve is kept on the filesystem containing `output_dir`.
+- Corpus scan temp indexes, Canonical assets, PDF page images, Dataset shards, model download, checkpoints and final adapter saves all check disk headroom before writing.
+- If free space is below the resume threshold, the pipeline stays in `WAITING_FOR_DISK` until space is available.
+- Console logs rotate at 50 MiB with three retained rotations.
+- Snapshot SQLite writes commit/checkpoint in bounded batches so the WAL cannot grow without bound.
+
+**VRAM**
+- Model placement is capped to about 12 GiB on the RTX 4080.
+- Each training step requires about 2.5 GiB free VRAM before it starts.
+- Supervised visual records contain at most one image.
+- Qwen image processing is capped to a bounded pixel area; PDF page raster images are also created under an explicit pixel budget.
+- CUDA OOM is caught: Oracle-Lite clears cache, lowers visual/text footprint, waits for VRAM, and retries from the latest checkpoint instead of exiting.
+
+**Corpus-scale memory**
+- scan seen-path state is stored in a temporary SQLite index instead of a Python `set`;
+- active source iteration uses SQLite cursors instead of `fetchall()`;
+- full/incremental snapshot creation streams rows and uses bounded batches;
+- SQLite temp work is forced to disk with a bounded page cache;
+- Dataset training uses local JSONL streaming instead of Arrow materialization.
+
+Hash reuse remains unchanged: if path + size + nanosecond mtime match the registry, Oracle-Lite reuses the existing SHA-256 without reading the full file again.
 
 ## Advanced/manual commands
 
@@ -244,7 +272,7 @@ oracle-lite train <snapshot_id>
 oracle-lite download-model
 ```
 
-V0.4.2 RTX 4080 policy:
+V0.4.4 RTX 4080 policy:
 
 - Qwen3.5-9B-Base;
 - 4-bit NF4;
@@ -287,7 +315,7 @@ output_dir/
 └── logs/
 ```
 
-## Known V0.4.2 limits
+## Known V0.4.4 limits
 
 - scanned PDF pages are visually preserved but OCR is not yet used as a deterministic label source;
 - PPTX embedded raster images are preserved, but the entire slide is not rendered into one screenshot;
