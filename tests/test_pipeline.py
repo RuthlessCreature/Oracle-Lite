@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from oracle_lite.config import AppConfig
+from oracle_lite.dashboard import TrainingMonitor
 from oracle_lite.db import Registry, utcnow
 from oracle_lite.pipeline import run_one_click
 
@@ -94,3 +95,26 @@ def test_smoke_run_never_marks_snapshot_fully_trained(tmp_path: Path):
     assert full.status == "trained"
     assert full.snapshot_id == smoke.snapshot_id
     assert calls[-1] == (smoke.snapshot_id, None)
+
+
+def test_one_click_streams_pipeline_state_to_monitor(tmp_path: Path):
+    cfg = make_cfg(tmp_path)
+    (cfg.corpus_dir / "manual.txt").write_text(
+        "dashboard pipeline telemetry",
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, int | None]] = []
+    monitor = TrainingMonitor(cfg.output_dir)
+
+    result = run_one_click(
+        cfg,
+        trainer=fake_trainer_factory(calls),
+        monitor=monitor,
+    )
+
+    state = monitor.snapshot()
+    assert result.status == "trained"
+    assert state["corpus"]["files_seen"] == 1
+    assert state["dataset"]["snapshot_id"] == result.snapshot_id
+    assert state["dataset"]["records"] >= 1
+    assert any(log["message"] == "Dataset ready" for log in state["logs"])
