@@ -240,32 +240,36 @@ def create_snapshot(
         )
 
         batch: list[tuple] = []
-        for member in iter_members():
-            batch.append((
-                snapshot_id,
-                member["content_hash"],
-                member["source_path"],
-                member["canonical_path"],
-                member["role"],
-                float(member["weight"]),
-            ))
-            if len(batch) >= 1000:
-                wait_for_disk(
-                    cfg.output_dir,
-                    policy,
-                    required_bytes=512 * MIB,
-                    poll_seconds=2.0,
-                    stable_samples=1,
-                )
-                conn.executemany(
-                    """INSERT INTO snapshot_members(
-                           snapshot_id,content_hash,source_path,canonical_path,role,weight
-                       ) VALUES(?,?,?,?,?,?)""",
-                    batch,
-                )
-                conn.commit()
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                batch.clear()
+        with manifest_path.open("r", encoding="utf-8") as manifest:
+            for line in manifest:
+                if not line.strip():
+                    continue
+                member = json.loads(line)
+                batch.append((
+                    snapshot_id,
+                    member["content_hash"],
+                    member["source_path"],
+                    member["canonical_path"],
+                    member["role"],
+                    float(member["weight"]),
+                ))
+                if len(batch) >= 1000:
+                    wait_for_disk(
+                        cfg.output_dir,
+                        policy,
+                        required_bytes=512 * MIB,
+                        poll_seconds=2.0,
+                        stable_samples=1,
+                    )
+                    conn.executemany(
+                        """INSERT INTO snapshot_members(
+                               snapshot_id,content_hash,source_path,canonical_path,role,weight
+                           ) VALUES(?,?,?,?,?,?)""",
+                        batch,
+                    )
+                    conn.commit()
+                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    batch.clear()
         if batch:
             wait_for_disk(
                 cfg.output_dir,
@@ -282,6 +286,7 @@ def create_snapshot(
             )
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+
 
     return SnapshotResult(
         snapshot_id=snapshot_id,
