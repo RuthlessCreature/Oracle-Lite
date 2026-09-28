@@ -19,7 +19,7 @@ class DatasetResult:
     characters: int
 
 
-def build_cpt_dataset(
+def build_domain_dataset(
     cfg: AppConfig,
     *,
     snapshot_id: str,
@@ -146,3 +146,4 @@ def build_cpt_dataset(
         visual_records=visual_records,
         characters=characters,
     )
+\n\n# Backward compatibility for early v0.1 callers.\nbuild_cpt_dataset = build_domain_dataset\n
