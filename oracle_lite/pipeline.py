@@ -39,7 +39,6 @@ def _snapshot_matches_current(
     snapshot_row,
     *,
     parser_version: str,
-    active_hashes: set[str],
 ) -> bool:
     if snapshot_row is None:
         return False
@@ -52,7 +51,10 @@ def _snapshot_matches_current(
     if snapshot_cfg.get("parser_version") != parser_version:
         return False
 
-    return registry.snapshot_hashes(snapshot_row["snapshot_id"]) == active_hashes
+    return registry.snapshot_matches_active_ready(
+        snapshot_row["snapshot_id"],
+        parser_version,
+    )
 
 
 def _dataset_meta(cfg: AppConfig, snapshot_id: str) -> tuple[Path, Path]:
@@ -141,11 +143,11 @@ def run_one_click(
             nonlocal memory_paused
             monitor.update("corpus", payload)
             state = payload.get("parse_state")
-            if state == "waiting_for_memory" and not memory_paused:
+            if state in {"waiting_for_memory", "waiting_for_disk"} and not memory_paused:
                 memory_paused = True
                 monitor.update_phase(
-                    "waiting_for_memory",
-                    "Waiting for memory to recover",
+                    state,
+                    "Waiting for RAM" if state == "waiting_for_memory" else "Waiting for disk space",
                     status="paused",
                 )
             elif (
@@ -180,8 +182,7 @@ def run_one_click(
         )
 
     registry = Registry(cfg.registry_path)
-    active_hashes = registry.active_ready_hashes(cfg.parser_version)
-    if not active_hashes:
+    if registry.active_ready_count(cfg.parser_version) <= 0:
         raise ValueError(
             "No trainable canonical corpus is available. Check corpus_dir and parser failures."
         )
@@ -193,7 +194,6 @@ def run_one_click(
         registry,
         latest_full,
         parser_version=cfg.parser_version,
-        active_hashes=active_hashes,
     )
 
     if snapshot_reused:
