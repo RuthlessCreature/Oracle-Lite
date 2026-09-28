@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 @dataclass(slots=True)
@@ -33,10 +33,9 @@ class CanonicalDocument:
     segments: list[CanonicalSegment] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     extracted_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    segments_path: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        # Avoid dataclasses.asdict(): it recursively deep-copies large text and
-        # segment structures before JSON serialization.
+    def to_dict(self, *, include_segments: bool = True) -> dict[str, Any]:
         return {
             "content_hash": self.content_hash,
             "source_path": self.source_path,
@@ -45,25 +44,66 @@ class CanonicalDocument:
             "parser_version": self.parser_version,
             "text": self.text,
             "title": self.title,
-            "segments": [segment.to_dict() for segment in self.segments],
+            "segments": [segment.to_dict() for segment in self.segments] if include_segments else [],
+            "segments_path": self.segments_path,
             "metadata": self.metadata,
             "extracted_at": self.extracted_at,
         }
 
+    @staticmethod
+    def _sidecar_path(path: Path) -> Path:
+        return path.with_suffix(path.suffix + ".segments.jsonl")
+
     def write_json(self, path: str | Path) -> None:
+        """Write small document metadata plus streamable segment JSONL sidecar."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+
+        sidecar = self._sidecar_path(path)
+        sidecar_tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
+        with sidecar_tmp.open("w", encoding="utf-8") as f:
+            for segment in self.segments:
+                json.dump(segment.to_dict(), f, ensure_ascii=False, separators=(",", ":"))
+                f.write("\n")
+        sidecar_tmp.replace(sidecar)
+
+        self.segments_path = str(sidecar.resolve())
         tmp = path.with_suffix(path.suffix + ".tmp")
-        # json.dump streams encoder chunks directly to disk instead of first
-        # constructing one giant JSON string in memory.
         with tmp.open("w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, ensure_ascii=False, separators=(",", ":"))
+            json.dump(
+                self.to_dict(include_segments=False),
+                f,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         tmp.replace(path)
 
     @classmethod
-    def read_json(cls, path: str | Path) -> "CanonicalDocument":
-        # json.load avoids an extra whole-file string created by read_text().
+    def read_header(cls, path: str | Path) -> dict[str, Any]:
         with Path(path).open("r", encoding="utf-8") as f:
-            raw = json.load(f)
-        raw["segments"] = [CanonicalSegment(**item) for item in raw.get("segments", [])]
+            return json.load(f)
+
+    @classmethod
+    def iter_segments(cls, path: str | Path) -> Iterator[CanonicalSegment]:
+        raw = cls.read_header(path)
+        sidecar = raw.get("segments_path")
+        if sidecar:
+            sidecar_path = Path(sidecar)
+            if not sidecar_path.exists():
+                raise FileNotFoundError(sidecar_path)
+            with sidecar_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    yield CanonicalSegment(**json.loads(line))
+            return
+
+        # Backward compatibility with V0.2/V0.4 inline canonical artifacts.
+        for item in raw.get("segments", []):
+            yield CanonicalSegment(**item)
+
+    @classmethod
+    def read_json(cls, path: str | Path) -> "CanonicalDocument":
+        raw = cls.read_header(path)
+        raw["segments"] = list(cls.iter_segments(path))
         return cls(**raw)
