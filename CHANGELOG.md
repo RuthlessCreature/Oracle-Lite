@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1 - 2026-09-28
+
+- Added `torchvision>=0.21` to the `train` dependency set because Qwen3.5's visual/video processor requires it.
+- Training now imports/validates torchvision during dependency preflight, before any base-model download.
+- Torchvision import/runtime incompatibilities now fail with a direct reinstall instruction rather than after a multi-gigabyte model download.
+
 ## 0.5.0 - 2026-09-28
 
 - Added first-class mechanical CAD corpus extensions: STEP/STP and Parasolid X_T/X_B.
