@@ -26,23 +26,19 @@ console = Console()
 @app.command()
 def init(
     config: Path = typer.Option(Path("oracle.yaml"), help="Config file to create"),
-    corpus_dir: Path = typer.Option(Path("corpus"), help="Default corpus folder"),
 ):
-    """Initialize a local Oracle-Lite workspace."""
-    corpus_dir.mkdir(parents=True, exist_ok=True)
+    """Create the minimal three-field config template."""
     if config.exists():
         raise typer.BadParameter(f"Config already exists: {config}")
     config.write_text(
-        "corpus_roots:\n"
-        f"  - {corpus_dir.as_posix()}\n"
-        "state_dir: .oracle\n"
-        "parser_version: v1\n"
-        "hash_algorithm: sha256\n",
+        'minimax_api_key: "REPLACE_WITH_SK_CP_KEY"\n'
+        'corpus_dir: "D:/OracleLite/corpus"\n'
+        'output_dir: "D:/OracleLite/output"\n',
         encoding="utf-8",
     )
-    cfg = load_config(config)
-    Registry(cfg.registry_path)
-    console.print(f"[green]Initialized[/green] config={config} corpus={corpus_dir}")
+    console.print(
+        f"[green]Created[/green] {config}. Edit only the MiniMax key, corpus path and output path."
+    )
 
 
 @app.command()
@@ -50,7 +46,7 @@ def scan(
     config: Path = typer.Option(Path("oracle.yaml")),
     verify_all: bool = typer.Option(False, help="Re-hash every file even if size/mtime are unchanged"),
 ):
-    """Scan dynamic corpus folders and update the source registry."""
+    """Scan the dynamic corpus folder and update the source registry."""
     stats = scan_corpus(load_config(config), verify_all=verify_all)
     console.print_json(json.dumps(stats.as_dict()))
 
@@ -114,11 +110,18 @@ def build_cpt(
 
 @app.command("train-cpt")
 def train_cpt(
-    training_config: Path = typer.Option(..., exists=True, readable=True),
+    snapshot_id: str = typer.Argument(..., help="Snapshot whose CPT dataset should be trained"),
+    base_model: Path = typer.Option(..., exists=True, help="Local Hugging Face base-model directory"),
     config: Path = typer.Option(Path("oracle.yaml")),
+    max_steps: int | None = typer.Option(None, help="Optional smoke-test cap; omit for the built-in 1 epoch preset"),
 ):
-    """Run local QLoRA CPT from an already built immutable dataset."""
-    run_id = run_cpt_training(load_config(config), training_config)
+    """Run local RTX-4080-oriented QLoRA CPT with built-in defaults."""
+    run_id = run_cpt_training(
+        load_config(config),
+        snapshot_id=snapshot_id,
+        base_model=base_model,
+        max_steps=max_steps,
+    )
     console.print(f"[green]Training completed[/green] run_id={run_id}")
 
 
