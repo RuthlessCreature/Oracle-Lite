@@ -8,9 +8,11 @@ from oracle_lite.snapshot import create_snapshot
 
 
 def make_cfg(tmp_path: Path) -> AppConfig:
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    cfg = AppConfig(corpus_roots=[corpus], state_dir=tmp_path / ".oracle")
+    cfg = AppConfig(
+        minimax_api_key="sk-cp-test",
+        corpus_dir=tmp_path / "corpus",
+        output_dir=tmp_path / "output",
+    )
     cfg.ensure_dirs()
     return cfg
 
@@ -25,7 +27,7 @@ def manifest_hashes(path: Path) -> set[str]:
 
 def test_snapshot_is_immutable_when_source_changes(tmp_path: Path):
     cfg = make_cfg(tmp_path)
-    source = cfg.corpus_roots[0] / "knowledge.txt"
+    source = cfg.corpus_dir / "knowledge.txt"
     source.write_text("version one", encoding="utf-8")
 
     scan_corpus(cfg, verify_all=True)
