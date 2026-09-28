@@ -7,6 +7,7 @@ from pathlib import Path
 from .canonical import CanonicalDocument
 from .config import AppConfig
 from .db import Registry
+from .memory import MemoryPressureGate
 
 
 @dataclass(slots=True)
@@ -24,6 +25,7 @@ def build_domain_dataset(
     *,
     snapshot_id: str,
     max_records_per_shard: int = 2000,
+    memory_gate: MemoryPressureGate | None = None,
 ) -> DatasetResult:
     """Build mixed text + image/text domain records with bounded memory."""
     registry = Registry(cfg.registry_path)
@@ -70,6 +72,8 @@ def build_domain_dataset(
         # entire manifest. Each canonical segment is also streamed from its sidecar.
         with manifest_path.open("r", encoding="utf-8") as manifest:
             for line in manifest:
+                if memory_gate is not None:
+                    memory_gate.wait_until_safe(context="building dataset")
                 if not line.strip():
                     continue
                 member = json.loads(line)
@@ -79,6 +83,8 @@ def build_domain_dataset(
                 emitted_segment = False
 
                 for index, segment in enumerate(CanonicalDocument.iter_segments(canonical_path)):
+                    if memory_gate is not None:
+                        memory_gate.wait_until_safe(context="streaming canonical segment")
                     text = segment.text.strip()
                     images = [p for p in segment.images if Path(p).exists()]
                     if not text and not images:

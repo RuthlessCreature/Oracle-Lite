@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .config import AppConfig
 from .db import Registry
+from .memory import MemoryPressureGate
 from .models import DEFAULT_BASE_MODEL_ID, ensure_base_model
 
 
@@ -46,11 +47,14 @@ def _now() -> str:
 class MultimodalDomainCollator:
     """Batch-size-1 collator mixing text CLM and source-grounded VLM supervision."""
 
-    def __init__(self, processor, cfg: dict):
+    def __init__(self, processor, cfg: dict, memory_gate: MemoryPressureGate | None = None):
         self.processor = processor
         self.cfg = cfg
+        self.memory_gate = memory_gate
 
     def __call__(self, features: list[dict]):
+        if self.memory_gate is not None:
+            self.memory_gate.wait_until_safe(context="preparing training batch")
         if len(features) != 1:
             raise ValueError("RTX4080 multimodal preset requires micro_batch_size=1")
 
@@ -126,6 +130,7 @@ def run_domain_training(
     snapshot_id: str,
     max_steps: int | None = None,
     monitor=None,
+    memory_gate: MemoryPressureGate | None = None,
 ) -> str:
     """Train Qwen3.5-9B-Base on mixed text + image/text domain records.
 
@@ -153,8 +158,9 @@ def run_domain_training(
         ) from exc
 
     class _MonitorCallback(TrainerCallback):
-        def __init__(self, runtime_monitor):
+        def __init__(self, runtime_monitor, runtime_memory_gate):
             self.runtime_monitor = runtime_monitor
+            self.runtime_memory_gate = runtime_memory_gate
             self.started = None
 
         def _push(self, state, **extra):
@@ -188,6 +194,8 @@ def run_domain_training(
 
         def on_step_end(self, args, state, control, **kwargs):
             self._push(state)
+            if self.runtime_memory_gate is not None:
+                self.runtime_memory_gate.wait_until_safe(context="between training steps")
 
         def on_log(self, args, state, control, logs=None, **kwargs):
             logs = logs or {}
@@ -223,6 +231,8 @@ def run_domain_training(
     if max_steps is not None:
         cfg["max_steps"] = int(max_steps)
 
+    if memory_gate is not None:
+        memory_gate.wait_until_safe(context="model download/check")
     if monitor is not None:
         monitor.update("model", {"model_id": DEFAULT_BASE_MODEL_ID})
         monitor.update_phase("model_download", "Checking / downloading Qwen3.5-9B-Base")
@@ -278,6 +288,8 @@ def run_domain_training(
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
+        if memory_gate is not None:
+            memory_gate.wait_until_safe(context="loading model")
         if monitor is not None:
             monitor.update_phase("model_load", "Loading processor and 4-bit multimodal model")
         processor = AutoProcessor.from_pretrained(
@@ -319,6 +331,8 @@ def run_domain_training(
             if "visual" in lowered or "vision" in lowered:
                 parameter.requires_grad = False
 
+        if memory_gate is not None:
+            memory_gate.wait_until_safe(context="loading training dataset")
         if monitor is not None:
             monitor.update_phase("dataset_load", "Loading training dataset")
         raw_ds = load_dataset("json", data_files=shard_paths, split="train")
@@ -351,12 +365,16 @@ def run_domain_training(
             seed=cfg["seed"],
         )
 
-        callbacks = [_MonitorCallback(monitor)] if monitor is not None else None
+        callbacks = (
+            [_MonitorCallback(monitor, memory_gate)]
+            if monitor is not None or memory_gate is not None
+            else None
+        )
         trainer = Trainer(
             model=model,
             args=args,
             train_dataset=train_ds,
-            data_collator=MultimodalDomainCollator(processor, cfg),
+            data_collator=MultimodalDomainCollator(processor, cfg, memory_gate),
             callbacks=callbacks,
         )
 

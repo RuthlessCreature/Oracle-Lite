@@ -19,12 +19,13 @@ def parse_and_write_canonical(
     parser_version: str,
     result_queue,
     address_space_limit_bytes: int,
+    memory_tier: int = 0,
 ) -> None:
     """Parse exactly one source file inside an isolated worker process."""
     hard_limit_applied = apply_linux_address_space_limit(address_space_limit_bytes)
     try:
         source = Path(source_path)
-        parsed = parse_file(source, asset_dir=Path(asset_dir))
+        parsed = parse_file(source, asset_dir=Path(asset_dir), memory_tier=memory_tier)
 
         # Segment-aware parsers already preserve the useful text in segments.
         # Keeping an additional full-document concatenation doubles memory and
@@ -81,6 +82,7 @@ def parse_and_write_canonical(
         result_queue.put({
             "ok": True,
             "hard_limit_applied": hard_limit_applied,
+            "memory_tier": memory_tier,
             "visual_segments": visual_segments,
             "has_visual": bool(visual_segments),
         })
