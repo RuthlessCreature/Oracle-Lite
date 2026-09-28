@@ -421,8 +421,12 @@ def parse_and_write_canonical(
         # Known amplification-prone formats always use the bounded streaming
         # parser. Small text/native images may use the richer normal parser.
         force_streaming = (
-            ext in {".json", ".jsonl", ".pdf", ".docx", ".pptx"}
-            or (ext in {".txt", ".md", ".csv"} and source.stat().st_size > 64 * 1024 * 1024)
+            ext in {".jsonl", ".pdf", ".docx", ".pptx"}
+            or (ext == ".json" and source.stat().st_size > 32 * 1024 * 1024)
+            or (
+                ext in {".txt", ".md", ".csv"}
+                and source.stat().st_size > 64 * 1024 * 1024
+            )
         )
 
         if low_memory or force_streaming:
