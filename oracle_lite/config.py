@@ -10,6 +10,7 @@ import yaml
 DEFAULT_EXTENSIONS = {
     ".txt", ".md", ".json", ".jsonl", ".csv",
     ".pdf", ".docx", ".pptx",
+    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff",
 }
 DEFAULT_IGNORE_NAMES = {".git", ".oracle", "__pycache__"}
 ALLOWED_CONFIG_KEYS = {"minimax_api_key", "corpus_dir", "output_dir"}
@@ -29,15 +30,13 @@ class AppConfig:
     output_dir: Path
 
     # Internal defaults: intentionally not user-facing configuration.
-    parser_version: str = field(default="v1", init=False)
+    parser_version: str = field(default="v2-multimodal", init=False)
     hash_algorithm: str = field(default="sha256", init=False)
     include_extensions: set[str] = field(default_factory=lambda: set(DEFAULT_EXTENSIONS), init=False)
     ignore_names: set[str] = field(default_factory=lambda: set(DEFAULT_IGNORE_NAMES), init=False)
 
     @property
     def corpus_roots(self) -> list[Path]:
-        # Kept as a list internally so multiple roots can be added later without
-        # expanding the public config surface.
         return [self.corpus_dir]
 
     @property
@@ -53,12 +52,20 @@ class AppConfig:
         return self.output_dir / "canonical"
 
     @property
+    def assets_dir(self) -> Path:
+        return self.output_dir / "assets"
+
+    @property
     def snapshots_dir(self) -> Path:
         return self.output_dir / "snapshots"
 
     @property
     def datasets_dir(self) -> Path:
         return self.output_dir / "datasets"
+
+    @property
+    def models_dir(self) -> Path:
+        return self.output_dir / "models"
 
     @property
     def training_dir(self) -> Path:
@@ -70,13 +77,18 @@ class AppConfig:
 
     def ensure_dirs(self) -> None:
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.canonical_dir.mkdir(parents=True, exist_ok=True)
-        self.snapshots_dir.mkdir(parents=True, exist_ok=True)
-        self.datasets_dir.mkdir(parents=True, exist_ok=True)
-        self.training_dir.mkdir(parents=True, exist_ok=True)
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        for path in (
+            self.output_dir,
+            self.state_dir,
+            self.canonical_dir,
+            self.assets_dir,
+            self.snapshots_dir,
+            self.datasets_dir,
+            self.models_dir,
+            self.training_dir,
+            self.logs_dir,
+        ):
+            path.mkdir(parents=True, exist_ok=True)
 
 
 def load_config(path: str | Path = "oracle.yaml") -> AppConfig:
@@ -106,11 +118,10 @@ def load_config(path: str | Path = "oracle.yaml") -> AppConfig:
         output_dir=_resolve_path(str(raw["output_dir"]), base_dir),
     )
 
-    # Never let generated artifacts be recursively re-ingested as source corpus.
     if cfg.output_dir == cfg.corpus_dir or cfg.output_dir.is_relative_to(cfg.corpus_dir):
         raise ValueError(
             "output_dir must not be the same as, or inside, corpus_dir; "
-            "otherwise generated datasets/checkpoints can be re-ingested as corpus."
+            "otherwise generated artifacts can be re-ingested as corpus."
         )
 
     cfg.ensure_dirs()
