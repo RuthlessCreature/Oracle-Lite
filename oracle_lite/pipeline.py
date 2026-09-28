@@ -11,6 +11,7 @@ from .config import AppConfig
 from .dataset import build_domain_dataset
 from .db import Registry
 from .ingest import ingest_corpus
+from .memory import MemoryPressureGate
 from .scanner import scan_corpus
 from .snapshot import create_snapshot
 from .training import run_domain_training
@@ -60,7 +61,12 @@ def _dataset_meta(cfg: AppConfig, snapshot_id: str) -> tuple[Path, Path]:
     return output_dir, output_dir / "dataset.json"
 
 
-def _ensure_dataset(cfg: AppConfig, snapshot_id: str) -> tuple[dict, bool]:
+def _ensure_dataset(
+    cfg: AppConfig,
+    snapshot_id: str,
+    *,
+    memory_gate: MemoryPressureGate | None = None,
+) -> tuple[dict, bool]:
     output_dir, meta_path = _dataset_meta(cfg, snapshot_id)
 
     if meta_path.exists():
@@ -72,7 +78,11 @@ def _ensure_dataset(cfg: AppConfig, snapshot_id: str) -> tuple[dict, bool]:
     if output_dir.exists():
         shutil.rmtree(output_dir)
 
-    result = build_domain_dataset(cfg, snapshot_id=snapshot_id)
+    result = build_domain_dataset(
+        cfg,
+        snapshot_id=snapshot_id,
+        memory_gate=memory_gate,
+    )
     meta = json.loads((result.output_dir / "dataset.json").read_text(encoding="utf-8"))
     return meta, False
 
@@ -108,6 +118,7 @@ def run_one_click(
     verify_all: bool = False,
     trainer: Callable[..., str] | None = None,
     monitor: Any | None = None,
+    memory_gate: MemoryPressureGate | None = None,
 ) -> OneClickResult:
     """Scan -> ingest -> freeze current corpus -> build dataset -> train/resume.
 
@@ -139,7 +150,11 @@ def run_one_click(
         def ingest_progress(payload: dict[str, Any]) -> None:
             monitor.update("corpus", payload)
 
-    ingest_stats = ingest_corpus(cfg, progress=ingest_progress)
+    ingest_stats = ingest_corpus(
+        cfg,
+        progress=ingest_progress,
+        memory_gate=memory_gate,
+    )
     if monitor is not None:
         corpus_state = scan_stats.as_dict()
         corpus_state.update({
@@ -148,9 +163,17 @@ def run_one_click(
             "failed": ingest_stats.failed,
             "visual_documents": ingest_stats.visual_documents,
             "visual_segments": ingest_stats.visual_segments,
+            "deferred_memory": ingest_stats.deferred_memory,
+            "retried_memory": ingest_stats.retried_memory,
         })
         monitor.update("corpus", corpus_state)
         monitor.log("INFO", "Corpus ingest completed", **ingest_stats.as_dict())
+        if ingest_stats.deferred_memory:
+            monitor.log(
+                "WARNING",
+                f"{ingest_stats.deferred_memory} corpus file(s) deferred by memory policy; "
+                "they will be retried automatically on the next run.",
+            )
 
     if ingest_stats.failed:
         raise RuntimeError(
@@ -192,7 +215,11 @@ def run_one_click(
             reused=snapshot_reused,
         )
         monitor.update_phase("dataset", "Building multimodal training dataset")
-    dataset_meta, dataset_reused = _ensure_dataset(cfg, snapshot_id)
+    dataset_meta, dataset_reused = _ensure_dataset(
+        cfg,
+        snapshot_id,
+        memory_gate=memory_gate,
+    )
     if monitor is not None:
         monitor.update("dataset", {
             "snapshot_id": snapshot_id,
@@ -212,7 +239,11 @@ def run_one_click(
 
     # A normal no-argument run is idempotent once the current corpus is fully
     # trained. Smoke runs are never treated as completion.
-    if max_steps is None and _is_fully_trained(cfg, registry, snapshot_id):
+    if (
+        max_steps is None
+        and ingest_stats.deferred_memory == 0
+        and _is_fully_trained(cfg, registry, snapshot_id)
+    ):
         return OneClickResult(
             status="up_to_date",
             snapshot_id=snapshot_id,
@@ -233,12 +264,22 @@ def run_one_click(
             snapshot_id=snapshot_id,
             max_steps=max_steps,
             monitor=monitor,
+            memory_gate=memory_gate,
         )
     else:
         run_id = trainer(cfg, snapshot_id=snapshot_id, max_steps=max_steps)
 
+    if ingest_stats.deferred_memory:
+        result_status = (
+            "smoke_trained_with_deferred_memory"
+            if max_steps is not None
+            else "trained_with_deferred_memory"
+        )
+    else:
+        result_status = "smoke_trained" if max_steps is not None else "trained"
+
     return OneClickResult(
-        status="smoke_trained" if max_steps is not None else "trained",
+        status=result_status,
         snapshot_id=snapshot_id,
         snapshot_reused=snapshot_reused,
         dataset_reused=dataset_reused,
