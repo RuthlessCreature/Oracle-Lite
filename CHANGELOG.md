@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0 - 2026-09-28
+
+- Added first-class mechanical CAD corpus extensions: STEP/STP and Parasolid X_T/X_B.
+- Preserves original CAD files losslessly; extracts bounded deterministic metadata without fabricating geometry labels.
+- Added stable corpus identity derived from canonical `corpus_dir`.
+- Registry, Canonical, snapshot, dataset, training and logs are strictly namespaced per corpus; model cache remains shared.
+- Switching corpus directories cannot reuse or mix another corpus's active state, snapshots, datasets or training runs.
+- Switching back to a prior corpus restores its own hash cache.
+- Legacy v0.4 state migrates only when its recorded root proves it belongs exclusively to the current corpus.
+- Parser version is `v5-cad-corpus-isolation`.
+
 ## 0.4.5 - 2026-09-28
 
 - Removed a stale `watchdog.stop()` cleanup reference from the real `oracle-lite run` path after the no-kill watchdog removal.
