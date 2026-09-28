@@ -133,6 +133,7 @@ def ingest_corpus(
                 "content_hash": content_hash,
                 "parser_version": cfg.parser_version,
                 "result_queue": result_queue,
+                "address_space_limit_bytes": policy.max_worker_address_space_bytes,
             },
             name=f"oracle-ingest-{content_hash[:8]}",
         )
