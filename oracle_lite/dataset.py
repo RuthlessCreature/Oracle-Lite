@@ -146,4 +146,7 @@ def build_domain_dataset(
         visual_records=visual_records,
         characters=characters,
     )
-\n\n# Backward compatibility for early v0.1 callers.\nbuild_cpt_dataset = build_domain_dataset\n
+
+
+# Backward compatibility for early v0.1 callers.
+build_cpt_dataset = build_domain_dataset
