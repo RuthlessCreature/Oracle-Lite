@@ -41,14 +41,23 @@ class HostResourcePolicy:
             parser_as = int(min(6 * GIB, ram_total * 0.10))
             parser_rss = int(min(5 * GIB, ram_total * 0.08))
         else:
-            ram_reserve = int(min(ram_total * 0.45, max(2 * GIB, ram_total * 0.30)))
-            parser_as = int(min(4 * GIB, max(2 * GIB, ram_total * 0.15)))
-            parser_rss = int(min(3 * GIB, max(1 * GIB, ram_total * 0.12)))
+            # Small CI/dev hosts need the same invariant without production-sized
+            # absolute thresholds. Keep reserve + parser ceiling comfortably below
+            # physical RAM so admission can eventually succeed.
+            ram_reserve = int(
+                min(ram_total * 0.30, max(int(1.5 * GIB), ram_total * 0.20))
+            )
+            parser_as = int(
+                min(3 * GIB, max(1 * GIB, ram_total * 0.10), ram_total * 0.18)
+            )
+            parser_rss = int(
+                min(int(2.5 * GIB), max(int(0.75 * GIB), ram_total * 0.08))
+            )
 
         ram_resume = int(
             min(
                 ram_total * 0.70,
-                ram_reserve + parser_as + max(1 * GIB, ram_total * 0.02),
+                ram_reserve + parser_as + max(int(0.5 * GIB), ram_total * 0.02),
             )
         )
         ram_resume = max(ram_resume, ram_reserve)
