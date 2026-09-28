@@ -143,7 +143,6 @@ def _stream_office_source(
 ) -> tuple[int, int]:
     ext = source.suffix.lower()
     prefix = "word/" if ext == ".docx" else "ppt/"
-    xml_names: list[str]
     with zipfile.ZipFile(source) as zf:
         if ext == ".docx":
             xml_names = ["word/document.xml"] if "word/document.xml" in zf.namelist() else []
@@ -153,27 +152,15 @@ def _stream_office_source(
                 if n.startswith("ppt/slides/slide") and n.endswith(".xml")
             )
 
-        asset_dir.mkdir(parents=True, exist_ok=True)
         media_names = sorted(
             n for n in zf.namelist()
-            if n.startswith(prefix + "media/") and Path(n).suffix.lower() in RASTER_EXTENSIONS
+            if n.startswith(prefix + "media/")
+            and Path(n).suffix.lower() in RASTER_EXTENSIONS
         )
-        copied_images: list[str] = []
-        for idx, name in enumerate(media_names, start=1):
-            suffix = Path(name).suffix.lower()
-            target = asset_dir / f"media-{idx:05d}{suffix}"
-            info = zf.getinfo(name)
-            _wait_disk_space(
-                output_dir,
-                disk_reserve_bytes=disk_reserve_bytes,
-                disk_resume_bytes=disk_resume_bytes,
-                required_bytes=max(4 * 1024 * 1024, int(info.file_size) * 2),
-            )
-            with zf.open(name) as src, target.open("wb") as dst:
-                shutil.copyfileobj(src, dst, length=1024 * 1024)
-            copied_images.append(str(target.resolve()))
-
+        asset_dir.mkdir(parents=True, exist_ok=True)
         segments = 0
+        image_count = 0
+
         with sidecar_tmp.open("w", encoding="utf-8") as out:
             for xml_index, name in enumerate(xml_names):
                 with zf.open(name) as stream:
@@ -211,22 +198,31 @@ def _stream_office_source(
                         ):
                             segments += 1
 
-            # Preserve raster assets as independent unlabeled visual segments.
-            # They remain available for future OCR/RAG but are filtered from
-            # supervised training because text is intentionally empty.
-            for image_index, image_path in enumerate(copied_images):
+            for idx, name in enumerate(media_names, start=1):
+                suffix = Path(name).suffix.lower()
+                target = asset_dir / f"media-{idx:05d}{suffix}"
+                info = zf.getinfo(name)
+                _wait_disk_space(
+                    output_dir,
+                    disk_reserve_bytes=disk_reserve_bytes,
+                    disk_resume_bytes=disk_resume_bytes,
+                    required_bytes=max(4 * 1024 * 1024, int(info.file_size) * 2),
+                )
+                with zf.open(name) as src, target.open("wb") as dst:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+                image_count += 1
                 if _append_segment(
                     out,
                     text="",
-                    images=[image_path],
+                    images=[str(target.resolve())],
                     metadata={
                         "kind": "office_low_memory_unlabeled_image",
-                        "image_index": image_index,
+                        "image_index": idx - 1,
                     },
                 ):
                     segments += 1
 
-        return segments, len(copied_images)
+        return segments, image_count
 
 
 def _stream_pdf_source(
