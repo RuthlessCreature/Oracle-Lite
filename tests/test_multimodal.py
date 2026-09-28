@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 from PIL import Image
 
 from oracle_lite.canonical import CanonicalDocument
