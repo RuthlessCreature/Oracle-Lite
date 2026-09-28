@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+import shutil
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -88,8 +90,41 @@ class AppConfig:
     def logs_dir(self) -> Path:
         return self.corpus_output_dir / "logs"
 
+    def _migrate_legacy_single_corpus_state(self) -> None:
+        """Reuse v0.4 registry only when every recorded root is this corpus."""
+        legacy_registry = self.output_dir / "_state" / "registry.sqlite3"
+        if self.registry_path.exists() or not legacy_registry.exists():
+            return
+        try:
+            conn = sqlite3.connect(legacy_registry)
+            try:
+                roots = {
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT DISTINCT root FROM source_files WHERE root IS NOT NULL"
+                    )
+                }
+            finally:
+                conn.close()
+        except Exception:
+            return
+        expected = str(self.corpus_dir.resolve())
+        if roots != {expected}:
+            return
+
+        # Move the entire legacy generated state under this corpus namespace.
+        # Models remain shared at output_dir/models and are intentionally untouched.
+        for name in ("_state", "canonical", "assets", "snapshots", "datasets", "training", "logs"):
+            source = self.output_dir / name
+            target = self.corpus_output_dir / name
+            if not source.exists() or target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
+
     def ensure_dirs(self) -> None:
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_single_corpus_state()
         for path in (
             self.output_dir,
             self.corpus_output_dir,
