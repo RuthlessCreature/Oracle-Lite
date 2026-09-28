@@ -213,7 +213,7 @@ It displays:
 - current checkpoint and resume status;
 - GPU utilization, temperature, power and VRAM used / total;
 - CPU utilization;
-- system RAM and Oracle-Lite process RSS;
+- system RAM, available RAM, reserved RAM, swap pressure, Oracle-Lite RSS and whole process-tree RSS;
 - disk used / free / total;
 - corpus counts: seen / new / changed / duplicates / tombstones / parse failures;
 - dataset counts: total / text / visual records;
@@ -225,7 +225,7 @@ If NVML/GPU telemetry is unavailable, GPU monitoring degrades gracefully and tra
 
 ### Memory safety during corpus parsing
 
-Each source file is parsed in an isolated worker process. Oracle-Lite keeps a system-RAM reserve and monitors parser-worker RSS. If a pathological PDF/PPT/JSON attempts to consume unsafe amounts of memory, that worker is terminated and the source is reported as failed instead of allowing the workstation to become unresponsive.
+Each source file is parsed in an isolated worker process. On Linux, the worker receives an OS-level `RLIMIT_AS` hard address-space cap before it opens source content. Oracle-Lite also keeps a conservative host-RAM reserve (at least 25% / 12 GiB, whichever is larger), monitors parser-worker RSS, and allows only about 512 MiB of additional swap growth during a run. If any redline is crossed, the worker or Oracle-Lite itself is terminated immediately rather than allowing the workstation to become unresponsive.
 
 Canonical segments are stored in streamable JSONL sidecars, and Dataset construction reads both snapshot manifests and Canonical segments line-by-line. PDF page objects are released as they are rasterized; DOCX media extraction and text/JSONL readers use bounded streaming where possible.
 
