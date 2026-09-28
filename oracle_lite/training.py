@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import inspect
 import json
 import math
 import os
@@ -93,6 +94,82 @@ def _prepare_kbit_model_memory_safe(
             model.gradient_checkpointing_enable()
 
     return model
+
+
+def _build_training_arguments(
+    TrainingArguments,
+    *,
+    output_dir: Path,
+    cfg: dict,
+):
+    """Build TrainingArguments against the installed Transformers signature.
+
+    Transformers v5 has changed scheduler/trainer argument names across releases.
+    Oracle-Lite keeps a small stable contract and maps/drops only non-critical
+    compatibility arguments after inspecting the real local constructor.
+    """
+    signature = inspect.signature(TrainingArguments.__init__)
+    parameters = signature.parameters
+    accepts_kwargs = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD
+        for p in parameters.values()
+    )
+
+    candidate = {
+        "output_dir": str(output_dir),
+        "per_device_train_batch_size": cfg["micro_batch_size"],
+        "gradient_accumulation_steps": cfg["gradient_accumulation_steps"],
+        "learning_rate": cfg["learning_rate"],
+        "num_train_epochs": 1.0,
+        "max_steps": int(cfg["max_steps"]),
+        "weight_decay": cfg["weight_decay"],
+        "logging_steps": cfg["logging_steps"],
+        "save_steps": cfg["save_steps"],
+        "save_total_limit": cfg["save_total_limit"],
+        "bf16": True,
+        "fp16": False,
+        "gradient_checkpointing": cfg["gradient_checkpointing"],
+        "optim": cfg["optim"],
+        "report_to": [],
+        "remove_unused_columns": False,
+        "dataloader_num_workers": 0,
+        "seed": cfg["seed"],
+    }
+
+    # warmup_steps is the most stable v5 surface and accepts a float in [0,1)
+    # as a ratio in current Transformers documentation.
+    if accepts_kwargs or "warmup_steps" in parameters:
+        candidate["warmup_steps"] = float(cfg["warmup_ratio"])
+    elif "warmup_ratio" in parameters:
+        candidate["warmup_ratio"] = float(cfg["warmup_ratio"])
+
+    required = {
+        "output_dir",
+        "per_device_train_batch_size",
+        "gradient_accumulation_steps",
+        "learning_rate",
+        "max_steps",
+    }
+    if not accepts_kwargs:
+        missing = sorted(name for name in required if name not in parameters)
+        if missing:
+            raise RuntimeError(
+                "Installed Transformers TrainingArguments is incompatible with "
+                f"Oracle-Lite core training contract; missing: {missing}"
+            )
+
+    if accepts_kwargs:
+        supported = candidate
+        dropped: list[str] = []
+    else:
+        supported = {
+            name: value
+            for name, value in candidate.items()
+            if name in parameters
+        }
+        dropped = sorted(set(candidate) - set(supported))
+
+    return TrainingArguments(**supported), dropped
 
 
 class MultimodalDomainCollator:
@@ -658,27 +735,17 @@ def run_domain_training(
             streaming=True,
         ).filter(lambda row: bool((row.get("text") or "").strip()))
 
-        args = TrainingArguments(
-            output_dir=str(output_dir),
-            per_device_train_batch_size=cfg["micro_batch_size"],
-            gradient_accumulation_steps=cfg["gradient_accumulation_steps"],
-            learning_rate=cfg["learning_rate"],
-            num_train_epochs=1.0,
-            max_steps=int(cfg["max_steps"]),
-            warmup_ratio=cfg["warmup_ratio"],
-            weight_decay=cfg["weight_decay"],
-            logging_steps=cfg["logging_steps"],
-            save_steps=cfg["save_steps"],
-            save_total_limit=cfg["save_total_limit"],
-            bf16=True,
-            fp16=False,
-            gradient_checkpointing=cfg["gradient_checkpointing"],
-            optim=cfg["optim"],
-            report_to=[],
-            remove_unused_columns=False,
-            dataloader_num_workers=0,
-            seed=cfg["seed"],
+        args, dropped_training_args = _build_training_arguments(
+            TrainingArguments,
+            output_dir=output_dir,
+            cfg=cfg,
         )
+        if dropped_training_args and monitor is not None:
+            monitor.log(
+                "WARNING",
+                "Installed Transformers omitted non-critical TrainingArguments",
+                dropped=dropped_training_args,
+            )
 
         def make_trainer():
             callbacks = [_MonitorCallback(monitor)] if monitor is not None else None

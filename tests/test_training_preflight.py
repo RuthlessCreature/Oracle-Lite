@@ -26,8 +26,49 @@ def test_rtx4080_training_avoids_stock_peft_fp32_prepare():
     assert 'torch_dtype=torch.bfloat16' not in text
 
 
-def test_package_versions_match():
+def test_trainingarguments_compat_uses_warmup_steps_when_ratio_name_is_absent():
+    from oracle_lite.training import _build_training_arguments
+
+    class FakeArgs:
+        def __init__(
+            self,
+            output_dir,
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=1,
+            learning_rate=1e-4,
+            max_steps=1,
+            warmup_steps=0,
+            bf16=False,
+        ):
+            self.output_dir = output_dir
+            self.warmup_steps = warmup_steps
+
+    cfg = {
+        "micro_batch_size": 1,
+        "gradient_accumulation_steps": 32,
+        "learning_rate": 5e-5,
+        "num_train_epochs": 1.0,
+        "max_steps": 10,
+        "warmup_ratio": 0.03,
+        "weight_decay": 0.0,
+        "logging_steps": 10,
+        "save_steps": 50,
+        "save_total_limit": 2,
+        "gradient_checkpointing": True,
+        "optim": "paged_adamw_8bit",
+        "seed": 42,
+    }
+    args, dropped = _build_training_arguments(
+        FakeArgs,
+        output_dir=Path("/tmp/train"),
+        cfg=cfg,
+    )
+    assert args.warmup_steps == 0.03
+    assert "warmup_ratio" not in dropped
+
+
+def test_package_versions_match_053():
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
     init = Path("oracle_lite/__init__.py").read_text(encoding="utf-8")
-    assert 'version = "0.5.2"' in pyproject
-    assert '__version__ = "0.5.2"' in init
+    assert 'version = "0.5.3"' in pyproject
+    assert '__version__ = "0.5.3"' in init

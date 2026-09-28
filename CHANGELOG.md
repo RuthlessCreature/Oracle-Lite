@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3 - 2026-09-28
+
+- Added a signature-aware Transformers TrainingArguments compatibility layer.
+- Warmup now uses `warmup_steps=0.03`, which current Transformers v5 interprets as a ratio, avoiding local builds that reject `warmup_ratio`.
+- Non-critical TrainingArguments absent from the installed version are dropped with a dashboard warning.
+- Core training arguments are validated and fail clearly if the installed Transformers build is fundamentally incompatible.
+
 ## 0.5.2 - 2026-09-28
 
 - Replaced PEFT's stock `prepare_model_for_kbit_training()` in the RTX 4080 path because it bulk-promoted Qwen3.5 non-4-bit BF16/FP16 parameters to FP32 and caused a multi-GiB VRAM spike.
