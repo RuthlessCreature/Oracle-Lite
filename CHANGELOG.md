@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.2 - 2026-09-28
+
+- Replaced PEFT's stock `prepare_model_for_kbit_training()` in the RTX 4080 path because it bulk-promoted Qwen3.5 non-4-bit BF16/FP16 parameters to FP32 and caused a multi-GiB VRAM spike.
+- Added Oracle-Lite memory-safe k-bit preparation: freeze base weights, enable input gradients and gradient checkpointing, but preserve loaded base dtypes.
+- LoRA now excludes `visual/vision` modules up front instead of injecting visual adapters and freezing them afterward.
+- Disabled PEFT adapter dtype autocast to FP32 for the 16GB preset.
+- Enabled PyTorch expandable CUDA allocator segments using `PYTORCH_ALLOC_CONF`.
+- Reduced the default Qwen3.5 image pixel budget to 393,216 pixels and tightened the OOM fallback ladder.
+- Replaced deprecated Transformers `torch_dtype` with `dtype`.
+- Fixed package metadata version drift between `pyproject.toml` and `oracle_lite.__version__`.
+
 ## 0.5.1 - 2026-09-28
 
 - Added `torchvision>=0.21` to the `train` dependency set because Qwen3.5's visual/video processor requires it.
