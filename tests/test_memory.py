@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from oracle_lite.memory import GIB, MIB, MemoryPolicy
+from oracle_lite.memory import GIB, MIB, MemoryPolicy, wait_for_safe_memory
 
 
 def test_auto_memory_policy_keeps_conservative_system_reserve_and_worker_cap():
@@ -12,7 +12,8 @@ def test_auto_memory_policy_keeps_conservative_system_reserve_and_worker_cap():
     assert policy.reserve_system_bytes >= 12 * GIB
     assert policy.reserve_system_bytes < policy.total_bytes
     assert 4 * GIB <= policy.max_worker_rss_bytes <= 8 * GIB
-    assert 5 * GIB <= policy.max_worker_address_space_bytes <= 10 * GIB
+    assert 6 * GIB <= policy.max_worker_address_space_bytes <= 12 * GIB
+    assert policy.resume_system_bytes >= policy.reserve_system_bytes
     assert policy.max_worker_rss_bytes < policy.total_bytes
     assert policy.max_worker_address_space_bytes < policy.total_bytes
     assert policy.max_swap_growth_bytes == 512 * MIB
@@ -40,3 +41,21 @@ except MemoryError:
     assert "limit True" in proc.stdout
     assert "blocked" in proc.stdout
     assert "unexpected-allocation" not in proc.stdout
+
+
+def test_wait_for_safe_memory_returns_without_failure_when_safe(monkeypatch):
+    policy = MemoryPolicy.auto()
+
+    class VM:
+        available = policy.resume_system_bytes + GIB
+
+    monkeypatch.setattr("oracle_lite.memory.psutil.virtual_memory", lambda: VM())
+    events = []
+    wait_for_safe_memory(
+        policy,
+        on_wait=lambda state: events.append(state),
+        poll_seconds=0.0,
+        stable_samples=1,
+    )
+    assert events
+    assert events[-1]["safe"] is True
