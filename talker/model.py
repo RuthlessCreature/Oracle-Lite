@@ -16,12 +16,21 @@ Do not invent facts that are not supported by the conversation, attachments,
 or the model's learned domain knowledge. Clearly say when evidence is missing.
 For mechanical/CAD material, preserve dimensions, units, identifiers and
 technical terminology exactly when they are present.
+When the user asks for all items, a complete list, a full review, or an
+item-by-item breakdown, continue until the requested list is complete.
 """
 
 MAX_HISTORY_MESSAGES = 10
 MAX_CONTEXT_CHARS = 14_000
 MAX_IMAGES = 2
 VISION_PIXELS = 196_608
+
+# Long answers are generated in bounded chunks. This avoids a single huge
+# generation request while preventing the old 384-token hard truncation.
+GENERATION_CHUNK_TOKENS = 768
+GENERATION_TOTAL_TOKENS = 3_072
+GENERATION_FALLBACK_CHUNK_TOKENS = 384
+GENERATION_FALLBACK_TOTAL_TOKENS = 1_536
 
 
 class TalkerModel:
@@ -109,6 +118,8 @@ class TalkerModel:
             "adapter_dir": str(bundle.adapter_dir) if bundle else None,
             "base_model_path": str(bundle.base_model_path) if bundle else None,
             "adapter_kind": bundle.source_kind if bundle else None,
+            "generation_chunk_tokens": GENERATION_CHUNK_TOKENS,
+            "generation_total_tokens": GENERATION_TOTAL_TOKENS,
         }
 
     def _image_tokens(self, count: int) -> str:
@@ -123,11 +134,7 @@ class TalkerModel:
 
     def _context(self, messages: list[dict], max_chars: int) -> tuple[str, list[str]]:
         selected = messages[-MAX_HISTORY_MESSAGES:]
-        pieces: list[str] = []
-        total = 0
 
-        # Keep conversation text in chronological order, but select images from
-        # newest to oldest so a follow-up refers to the most recent visual input.
         newest_images: list[str] = []
         for message in reversed(selected):
             for attachment in reversed(message.get("attachments", [])):
@@ -142,7 +149,11 @@ class TalkerModel:
                 break
         images = list(reversed(newest_images))
 
-        for message in selected:
+        # Budget text newest-first so an old, large attachment never pushes the
+        # current user request out of the prompt.
+        kept_reversed: list[str] = []
+        total = 0
+        for message in reversed(selected):
             role = "User" if message["role"] == "user" else "Assistant"
             content = (message.get("content") or "").strip()
             attachment_parts: list[str] = []
@@ -156,14 +167,16 @@ class TalkerModel:
             block = f"{role}: {content}"
             if attachment_parts:
                 block += "\n" + "\n".join(attachment_parts)
+
             remaining = max_chars - total
             if remaining <= 0:
                 break
-            block = block[:remaining]
-            pieces.append(block)
+            if len(block) > remaining:
+                block = block[-remaining:]
+            kept_reversed.append(block)
             total += len(block)
 
-        return "\n\n".join(pieces), images
+        return "\n\n".join(reversed(kept_reversed)), images
 
     def _input_device(self):
         torch = self.torch
@@ -179,6 +192,14 @@ class TalkerModel:
                 return parameter.device
         return torch.device("cuda:0")
 
+    def _eos_ids(self) -> set[int]:
+        value = self.processor.tokenizer.eos_token_id
+        if value is None:
+            return set()
+        if isinstance(value, (list, tuple, set)):
+            return {int(item) for item in value}
+        return {int(value)}
+
     def _generate_once(
         self,
         messages: list[dict],
@@ -186,7 +207,9 @@ class TalkerModel:
         max_context_chars: int,
         max_new_tokens: int,
         max_images: int,
-    ) -> str:
+        assistant_prefix: str = "",
+    ) -> tuple[str, bool, int]:
+        """Generate one bounded chunk and report stop reason plus token count."""
         torch = self.torch
         context, image_paths = self._context(messages, max_context_chars)
         image_paths = image_paths[-max_images:] if max_images else []
@@ -197,6 +220,7 @@ class TalkerModel:
             + "\n\nConversation:\n"
             + context
             + "\n\nAssistant:"
+            + assistant_prefix
         )
 
         images = []
@@ -233,11 +257,22 @@ class TalkerModel:
                     eos_token_id=self.processor.tokenizer.eos_token_id,
                 )
             generated = output[:, input_length:]
+            generated_count = int(generated.shape[1])
             text = self.processor.tokenizer.batch_decode(
                 generated,
                 skip_special_tokens=True,
-            )[0].strip()
-            return text or "(The model returned an empty response.)"
+            )[0]
+
+            last_token = (
+                int(generated[0, -1].item())
+                if generated_count > 0
+                else None
+            )
+            hit_limit = (
+                generated_count >= max_new_tokens
+                and (last_token is None or last_token not in self._eos_ids())
+            )
+            return text, hit_limit, generated_count
         finally:
             for image in images:
                 try:
@@ -248,24 +283,62 @@ class TalkerModel:
             if torch is not None and torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+    def _answer_with_auto_continue(
+        self,
+        messages: list[dict],
+        *,
+        max_context_chars: int,
+        chunk_tokens: int,
+        total_tokens: int,
+        max_images: int,
+    ) -> str:
+        parts: list[str] = []
+        estimated_tokens = 0
+
+        while estimated_tokens < total_tokens:
+            allowance = min(chunk_tokens, total_tokens - estimated_tokens)
+            prefix = "".join(parts)
+            chunk, hit_limit, generated_count = self._generate_once(
+                messages,
+                max_context_chars=max_context_chars,
+                max_new_tokens=allowance,
+                max_images=max_images,
+                assistant_prefix=prefix,
+            )
+            if not chunk:
+                break
+
+            parts.append(chunk)
+            estimated_tokens += max(1, generated_count)
+
+            if not hit_limit:
+                break
+
+        answer = "".join(parts).strip()
+        if not answer:
+            return "(The model returned an empty response.)"
+        return answer
+
     def answer(self, messages: list[dict]) -> str:
         if not self.loaded:
             raise RuntimeError("Talker model is not loaded")
 
         with self._lock:
             try:
-                return self._generate_once(
+                return self._answer_with_auto_continue(
                     messages,
                     max_context_chars=MAX_CONTEXT_CHARS,
-                    max_new_tokens=384,
+                    chunk_tokens=GENERATION_CHUNK_TOKENS,
+                    total_tokens=GENERATION_TOTAL_TOKENS,
                     max_images=MAX_IMAGES,
                 )
             except self.torch.cuda.OutOfMemoryError:
                 gc.collect()
                 self.torch.cuda.empty_cache()
-                return self._generate_once(
+                return self._answer_with_auto_continue(
                     messages,
                     max_context_chars=7_000,
-                    max_new_tokens=192,
+                    chunk_tokens=GENERATION_FALLBACK_CHUNK_TOKENS,
+                    total_tokens=GENERATION_FALLBACK_TOTAL_TOKENS,
                     max_images=1,
                 )

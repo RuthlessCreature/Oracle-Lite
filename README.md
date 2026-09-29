@@ -306,8 +306,13 @@ python -m talker
 bash talker/start.sh
 ```
 
-The browser opens automatically on localhost, starting at port 7870 and choosing
-another local port if needed.
+Talker starts at port 7870 (or the next free port), listens on all local
+interfaces, and prints all usable access URLs. It shows both
+`http://127.0.0.1:<port>/` and detected private-LAN addresses such as
+`http://192.168.x.x:<port>/`. The browser prefers the LAN URL when available,
+which is useful when a VPN/system proxy intercepts localhost. If the VPN has a
+"Block LAN" mode, enable its local-network/private-address bypass. Talker has no
+authentication, so do not expose this port to the public Internet.
 
 Talker provides:
 
@@ -323,6 +328,8 @@ Talker provides:
 - latest-Adapter reload from the Web UI;
 - a 512 MiB per-file upload ceiling;
 - recent-image prioritization and bounded conversation context;
+- automatic long-answer continuation in bounded generation chunks instead of a 384-token hard cut;
+- up to 3,072 generated tokens for complete lists/reviews before the global safety ceiling;
 - CUDA OOM retry with reduced context/image count.
 
 Talker stores only its own local state under `talker/state/`; it **reads** the

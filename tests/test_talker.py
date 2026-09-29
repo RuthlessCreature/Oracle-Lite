@@ -127,8 +127,44 @@ def test_talker_entrypoint_and_versions():
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
     oracle_version = Path("oracle_lite/__init__.py").read_text(encoding="utf-8")
     talker_version = Path("talker/__init__.py").read_text(encoding="utf-8")
-    assert 'version = "0.6.0"' in pyproject
+    assert 'version = "0.6.1"' in pyproject
     assert 'oracle-talker = "talker.__main__:main"' in pyproject
     assert 'include = ["oracle_lite*", "talker*"]' in pyproject
-    assert '__version__ = "0.6.0"' in oracle_version
-    assert '__version__ = "0.6.0"' in talker_version
+    assert '__version__ = "0.6.1"' in oracle_version
+    assert '__version__ = "0.6.1"' in talker_version
+
+
+def test_long_answers_auto_continue_with_exact_token_budget(monkeypatch, tmp_path: Path):
+    from talker.model import TalkerModel
+
+    talker = TalkerModel(tmp_path)
+    calls = []
+
+    def fake_generate(messages, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return "FAI01...FAI20\n", True, 3
+        return "FAI21...FAI40", False, 2
+
+    monkeypatch.setattr(talker, "_generate_once", fake_generate)
+    answer = talker._answer_with_auto_continue(
+        [{"role": "user", "content": "列出所有FAI", "attachments": []}],
+        max_context_chars=1000,
+        chunk_tokens=3,
+        total_tokens=6,
+        max_images=0,
+    )
+    assert answer == "FAI01...FAI20\nFAI21...FAI40"
+    assert len(calls) == 2
+    assert calls[1]["assistant_prefix"] == "FAI01...FAI20\n"
+
+
+def test_talker_no_longer_has_384_token_hard_cut_and_supports_lan_access():
+    model = Path("talker/model.py").read_text(encoding="utf-8")
+    main = Path("talker/__main__.py").read_text(encoding="utf-8")
+    assert "GENERATION_TOTAL_TOKENS = 3_072" in model
+    assert "GENERATION_CHUNK_TOKENS = 768" in model
+    assert 'max_new_tokens=384' not in model
+    assert 'host="0.0.0.0"' in main
+    assert 'sock.bind(("0.0.0.0", port))' in main
+    assert "_lan_ipv4_addresses" in main
