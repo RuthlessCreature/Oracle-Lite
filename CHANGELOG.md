@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.1 - 2026-09-29
+
+- Removed Talker's 384-token hard answer ceiling.
+- Long answers now generate in bounded 768-token chunks and automatically continue up to 3,072 generated tokens when EOS has not been reached.
+- Continuation uses the already generated assistant text as the prefix, so numbered lists can continue instead of restarting from item 1.
+- Total continuation length is enforced using the exact generated token count.
+- Conversation context is budgeted newest-first so a large old attachment cannot push the current user request out of context.
+- Talker now listens on `0.0.0.0` and prints loopback, localhost, and detected private-LAN URLs.
+- The browser prefers a non-VPN LAN URL when available, providing an alternate path when a VPN/proxy intercepts localhost.
+- Startup prints a security warning because the LAN listener has no authentication.
+
 ## 0.6.0 - 2026-09-29
 
 - Added root-level `talker/` local multimodal Web chat runtime.
