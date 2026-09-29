@@ -28,9 +28,8 @@ VISION_PIXELS = 196_608
 # Long answers are generated in bounded chunks. This avoids a single huge
 # generation request while preventing the old 384-token hard truncation.
 GENERATION_CHUNK_TOKENS = 768
-GENERATION_TOTAL_TOKENS = 3_072
 GENERATION_FALLBACK_CHUNK_TOKENS = 384
-GENERATION_FALLBACK_TOTAL_TOKENS = 1_536
+CONTINUATION_TAIL_CHARS = 8_000
 
 
 class TalkerModel:
@@ -119,7 +118,8 @@ class TalkerModel:
             "base_model_path": str(bundle.base_model_path) if bundle else None,
             "adapter_kind": bundle.source_kind if bundle else None,
             "generation_chunk_tokens": GENERATION_CHUNK_TOKENS,
-            "generation_total_tokens": GENERATION_TOTAL_TOKENS,
+            "generation_total_tokens": None,
+            "generation_mode": "unbounded-until-complete",
         }
 
     def _image_tokens(self, count: int) -> str:
@@ -199,6 +199,32 @@ class TalkerModel:
         if isinstance(value, (list, tuple, set)):
             return {int(item) for item in value}
         return {int(value)}
+
+    @staticmethod
+    def _normalized_chunk(text: str) -> str:
+        return " ".join(text.lower().split())
+
+    @staticmethod
+    def _trim_overlap(existing: str, new_text: str) -> str:
+        """Remove a repeated prefix when a continuation restates its tail."""
+        if not existing or not new_text:
+            return new_text
+        max_overlap = min(len(existing), len(new_text), 2_000)
+        for size in range(max_overlap, 19, -1):
+            if existing[-size:] == new_text[:size]:
+                return new_text[size:]
+        return new_text
+
+    def _continuation_prefix(self, complete_answer: str) -> str:
+        if not complete_answer:
+            return ""
+        tail = complete_answer[-CONTINUATION_TAIL_CHARS:]
+        return (
+            "\n\n[CONTINUATION CONTEXT — do not repeat earlier content. "
+            "Continue exactly after the final item/statement below until the "
+            "user's request is fully complete.]\n"
+            + tail
+        )
 
     def _generate_once(
         self,
@@ -289,32 +315,50 @@ class TalkerModel:
         *,
         max_context_chars: int,
         chunk_tokens: int,
-        total_tokens: int,
         max_images: int,
     ) -> str:
-        parts: list[str] = []
-        estimated_tokens = 0
+        """Continue chunk-by-chunk until EOS/completion, with no total token cap.
 
-        while estimated_tokens < total_tokens:
-            allowance = min(chunk_tokens, total_tokens - estimated_tokens)
-            prefix = "".join(parts)
-            chunk, hit_limit, generated_count = self._generate_once(
+        The accumulated answer lives outside the model prompt. Only a rolling
+        tail is sent back for continuity, so answer length itself does not make
+        each subsequent inference request grow without bound.
+        """
+        answer = ""
+        seen_chunks: set[str] = set()
+
+        while True:
+            prefix = self._continuation_prefix(answer)
+            chunk, hit_limit, _generated_count = self._generate_once(
                 messages,
                 max_context_chars=max_context_chars,
-                max_new_tokens=allowance,
+                max_new_tokens=chunk_tokens,
                 max_images=max_images,
                 assistant_prefix=prefix,
             )
             if not chunk:
                 break
 
-            parts.append(chunk)
-            estimated_tokens += max(1, generated_count)
+            chunk = self._trim_overlap(answer, chunk)
+            normalized = self._normalized_chunk(chunk)
+            if not normalized:
+                break
+
+            # Content-level runaway protection, not a length limit. If the model
+            # loops and emits the same continuation again, stop rather than
+            # generating forever.
+            if normalized in seen_chunks:
+                break
+            seen_chunks.add(normalized)
+
+            previous = answer
+            answer += chunk
+            if answer == previous:
+                break
 
             if not hit_limit:
                 break
 
-        answer = "".join(parts).strip()
+        answer = answer.strip()
         if not answer:
             return "(The model returned an empty response.)"
         return answer
@@ -329,7 +373,6 @@ class TalkerModel:
                     messages,
                     max_context_chars=MAX_CONTEXT_CHARS,
                     chunk_tokens=GENERATION_CHUNK_TOKENS,
-                    total_tokens=GENERATION_TOTAL_TOKENS,
                     max_images=MAX_IMAGES,
                 )
             except self.torch.cuda.OutOfMemoryError:
@@ -339,6 +382,5 @@ class TalkerModel:
                     messages,
                     max_context_chars=7_000,
                     chunk_tokens=GENERATION_FALLBACK_CHUNK_TOKENS,
-                    total_tokens=GENERATION_FALLBACK_TOTAL_TOKENS,
                     max_images=1,
                 )
