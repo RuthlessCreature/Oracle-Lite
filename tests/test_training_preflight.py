@@ -94,8 +94,8 @@ def test_rtx4080_preset_keeps_explicit_vram_headroom():
     assert "post-step VRAM headroom below safety reserve" in text
 
 
-def test_package_versions_match_061():
+def test_package_versions_match_062():
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
     init = Path("oracle_lite/__init__.py").read_text(encoding="utf-8")
-    assert 'version = "0.6.1"' in pyproject
-    assert '__version__ = "0.6.1"' in init
+    assert 'version = "0.6.2"' in pyproject
+    assert '__version__ = "0.6.2"' in init
