@@ -87,14 +87,25 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
 
     @app.post("/api/reload-model")
     async def reload_model():
-        # Recreate the loader so a newly completed adapter is discovered.
+        # A 9B model cannot safely coexist with its replacement on a 16GB GPU.
+        # Release the old instance first, then discover/load the newest adapter.
         old = state.model
+        try:
+            import torch
+            old.model = None
+            old.processor = None
+            old.bundle = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
         state.model = TalkerModel(cfg.training_output_dir)
         try:
             await run_in_threadpool(state.model.load)
             state.model_error = None
         except Exception as exc:
-            state.model = old
             state.model_error = f"{type(exc).__name__}: {exc}"
             raise HTTPException(status_code=500, detail=state.model_error)
         return state.status()
