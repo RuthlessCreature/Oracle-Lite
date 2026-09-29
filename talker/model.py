@@ -165,6 +165,20 @@ class TalkerModel:
 
         return "\n\n".join(pieces), images
 
+    def _input_device(self):
+        torch = self.torch
+        device_map = getattr(self.model, "hf_device_map", None) or {}
+        for value in device_map.values():
+            text = str(value)
+            if text.startswith("cuda"):
+                return torch.device(text)
+            if isinstance(value, int):
+                return torch.device(f"cuda:{value}")
+        for parameter in self.model.parameters():
+            if parameter.device.type == "cuda":
+                return parameter.device
+        return torch.device("cuda:0")
+
     def _generate_once(
         self,
         messages: list[dict],
@@ -200,14 +214,7 @@ class TalkerModel:
                 processor_kwargs["images"] = images
             inputs = self.processor(**processor_kwargs)
 
-            device = next(
-                (
-                    parameter.device
-                    for parameter in self.model.parameters()
-                    if parameter.device.type != "meta"
-                ),
-                torch.device("cuda:0"),
-            )
+            device = self._input_device()
             for key, value in list(inputs.items()):
                 if hasattr(value, "to"):
                     inputs[key] = value.to(device)
