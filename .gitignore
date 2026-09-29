@@ -25,3 +25,6 @@ checkpoints/
 *.safetensors
 *.bin
 *.gguf
+
+# Talker local chat state / uploads
+talker/state/
