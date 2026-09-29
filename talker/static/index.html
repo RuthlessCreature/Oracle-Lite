@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Oracle-Lite Talker</title>
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#0b0d10;--panel:#11151a;--panel2:#161b22;--line:#29313b;
+  --text:#e8edf2;--muted:#8f9baa;--accent:#6ea8fe;--danger:#ff6b6b;
+  --user:#1c2a3a;--assistant:#171c22;
+}
+*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+button,input,textarea{font:inherit}
+.app{height:100%;display:grid;grid-template-columns:280px minmax(0,1fr)}
+.sidebar{border-right:1px solid var(--line);background:#0e1115;display:flex;flex-direction:column;min-width:0}
+.brand{padding:18px;border-bottom:1px solid var(--line)}
+.brand h1{font-size:16px;margin:0 0 4px;letter-spacing:.08em}
+.brand small{color:var(--muted)}
+.side-actions{display:flex;gap:8px;padding:12px}
+button{border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:8px;padding:8px 10px;cursor:pointer}
+button:hover{border-color:#465364}button.primary{background:#214f82;border-color:#2e6aa8}button.danger{color:#ffb0b0}
+#conversations{padding:0 8px 12px;overflow:auto;flex:1}
+.conv{width:100%;text-align:left;margin:3px 0;padding:10px;border-radius:8px;background:transparent;border:1px solid transparent;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.conv:hover,.conv.active{background:var(--panel2);border-color:var(--line)}
+.main{min-width:0;display:flex;flex-direction:column;height:100%}
+.topbar{height:62px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 18px;background:#0e1115}
+.status{display:flex;align-items:center;gap:9px;min-width:0}.dot{width:9px;height:9px;border-radius:50%;background:#f0b429}.dot.ok{background:#3ecf8e}.dot.bad{background:#ff6b6b}
+.statusText{min-width:0}.statusText strong{display:block;font-size:13px}.statusText span{display:block;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:65vw}
+.messages{flex:1;overflow:auto;padding:24px max(18px,calc((100vw - 960px)/2));}
+.empty{color:var(--muted);text-align:center;margin-top:20vh}
+.msg{margin:0 0 18px;display:flex}.msg.user{justify-content:flex-end}.bubble{max-width:min(780px,86%);padding:12px 14px;border-radius:12px;background:var(--assistant);border:1px solid var(--line);white-space:pre-wrap;word-break:break-word}
+.msg.user .bubble{background:var(--user)}.role{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:6px}
+.attachments{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.chip{font-size:12px;border:1px solid #3b4654;background:#10151b;border-radius:999px;padding:4px 8px;color:#b8c4d1}
+.composer{border-top:1px solid var(--line);padding:12px max(16px,calc((100vw - 960px)/2));background:#0e1115}
+.filebar{display:flex;gap:6px;flex-wrap:wrap;min-height:0;margin-bottom:8px}
+.compose-row{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:end}
+.attach-btn{display:flex;align-items:center;justify-content:center;height:44px;min-width:44px}
+textarea{width:100%;min-height:44px;max-height:180px;resize:vertical;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:11px 12px;outline:none}
+textarea:focus{border-color:#4f78a5}
+#sendBtn{height:44px;min-width:78px}
+.notice{font-size:12px;color:var(--muted);margin-top:7px}.error{color:#ff9898}
+.loading::after{content:"";display:inline-block;width:12px;height:12px;border:2px solid #768397;border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;margin-left:8px;vertical-align:-2px}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:760px){.app{grid-template-columns:1fr}.sidebar{display:none}.messages,.composer{padding-left:12px;padding-right:12px}}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><h1>ORACLE-LITE TALKER</h1><small>Local multimodal adapter chat</small></div>
+    <div class="side-actions">
+      <button id="newBtn" class="primary">+ 新会话</button>
+      <button id="deleteBtn" class="danger">删除</button>
+    </div>
+    <div id="conversations"></div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div class="status">
+        <div id="statusDot" class="dot"></div>
+        <div class="statusText"><strong id="statusTitle">正在检查模型</strong><span id="statusDetail">—</span></div>
+      </div>
+      <button id="reloadBtn">重新加载最新 Adapter</button>
+    </header>
+    <section id="messages" class="messages"><div class="empty">新建或选择一个会话开始。</div></section>
+    <section class="composer">
+      <div id="filebar" class="filebar"></div>
+      <div class="compose-row">
+        <label class="attach-btn button" title="添加附件">
+          <button type="button" onclick="document.getElementById('files').click()">📎</button>
+          <input id="files" type="file" multiple hidden>
+        </label>
+        <textarea id="input" placeholder="输入消息。Shift+Enter 换行，Enter 发送。"></textarea>
+        <button id="sendBtn" class="primary">发送</button>
+      </div>
+      <div id="notice" class="notice">支持图片、PDF、DOCX、PPTX、TXT/MD/CSV、JSON/JSONL、STEP/STP、X_T/X_B。</div>
+    </section>
+  </main>
+</div>
+<script>
+let currentConversation=null;
+let pendingFiles=[];
+let busy=false;
+const $=id=>document.getElementById(id);
+const escapeHtml=s=>(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+
+async function api(url,options={}){
+  const r=await fetch(url,options);
+  let data=null;
+  try{data=await r.json()}catch{data={detail:await r.text()}}
+  if(!r.ok) throw new Error(data.detail||("HTTP "+r.status));
+  return data;
+}
+function setNotice(text,error=false){$("notice").textContent=text;$("notice").className="notice"+(error?" error":"")}
+async function loadStatus(){
+  try{
+    const s=await api("/api/status");
+    $("statusDot").className="dot "+(s.loaded?"ok":(s.error?"bad":""));
+    $("statusTitle").textContent=s.loaded?"模型已加载":"模型未就绪";
+    $("statusDetail").textContent=s.loaded?((s.adapter_kind||"adapter")+" · "+(s.adapter_dir||"")):(s.error||s.training_output_dir);
+  }catch(e){$("statusDot").className="dot bad";$("statusTitle").textContent="状态错误";$("statusDetail").textContent=e.message}
+}
+async function loadConversations(selectFirst=false){
+  const rows=await api("/api/conversations");
+  const box=$("conversations"); box.innerHTML="";
+  rows.forEach(row=>{
+    const b=document.createElement("button");
+    b.className="conv"+(row.id===currentConversation?" active":"");
+    b.textContent=row.title;
+    b.title=row.title;
+    b.onclick=()=>selectConversation(row.id);
+    box.appendChild(b);
+  });
+  if(selectFirst && rows.length && !currentConversation) await selectConversation(rows[0].id);
+}
+function renderMessages(rows){
+  const box=$("messages");box.innerHTML="";
+  if(!rows.length){box.innerHTML='<div class="empty">开始一个新的对话。</div>';return}
+  rows.forEach(row=>{
+    const wrap=document.createElement("div");wrap.className="msg "+row.role;
+    const bubble=document.createElement("div");bubble.className="bubble";
+    const role=document.createElement("div");role.className="role";role.textContent=row.role==="user"?"YOU":"ORACLE-LITE";
+    const content=document.createElement("div");content.textContent=row.content||"";
+    bubble.append(role,content);
+    if(row.attachments&&row.attachments.length){
+      const a=document.createElement("div");a.className="attachments";
+      row.attachments.forEach(x=>{const chip=document.createElement("span");chip.className="chip";chip.textContent="📎 "+x.filename;a.appendChild(chip)});
+      bubble.appendChild(a);
+    }
+    wrap.appendChild(bubble);box.appendChild(wrap);
+  });
+  box.scrollTop=box.scrollHeight;
+}
+async function selectConversation(id){
+  currentConversation=id;
+  const rows=await api("/api/conversations/"+id+"/messages");
+  renderMessages(rows);
+  await loadConversations();
+}
+async function newConversation(){
+  const c=await api("/api/conversations",{method:"POST"});
+  currentConversation=c.id; pendingFiles=[]; renderFilebar();
+  await loadConversations(); await selectConversation(c.id); $("input").focus();
+}
+async function deleteConversation(){
+  if(!currentConversation)return;
+  if(!confirm("删除当前会话及其附件历史？"))return;
+  await api("/api/conversations/"+currentConversation,{method:"DELETE"});
+  currentConversation=null;renderMessages([]);await loadConversations(true);
+}
+function renderFilebar(){
+  const b=$("filebar");b.innerHTML="";
+  pendingFiles.forEach((f,i)=>{
+    const chip=document.createElement("span");chip.className="chip";chip.textContent=f.name+" ×";
+    chip.style.cursor="pointer";chip.onclick=()=>{pendingFiles.splice(i,1);renderFilebar()};b.appendChild(chip);
+  });
+}
+async function send(){
+  if(busy)return;
+  const text=$("input").value.trim();
+  if(!text&&!pendingFiles.length)return;
+  busy=true;$("sendBtn").disabled=true;$("sendBtn").classList.add("loading");
+  setNotice("正在推理，本地 9B 模型可能需要一些时间…");
+  try{
+    if(!currentConversation){
+      const c=await api("/api/conversations",{method:"POST"});
+      currentConversation=c.id;
+    }
+    const fd=new FormData();fd.append("conversation_id",currentConversation);fd.append("message",text);
+    pendingFiles.forEach(f=>fd.append("files",f,f.name));
+    $("input").value="";
+    const sentFiles=[...pendingFiles];pendingFiles=[];renderFilebar();
+    const existing=await api("/api/conversations/"+currentConversation+"/messages");
+    renderMessages([...existing,{role:"user",content:text,attachments:sentFiles.map(f=>({filename:f.name}))},{role:"assistant",content:"正在生成…",attachments:[]}]);
+    const result=await api("/api/chat",{method:"POST",body:fd});
+    currentConversation=result.conversation_id;
+    renderMessages(result.messages);
+    await loadConversations();
+    setNotice("完成。");
+  }catch(e){
+    setNotice(e.message,true);
+    if(currentConversation){try{renderMessages(await api("/api/conversations/"+currentConversation+"/messages"))}catch{}}
+  }finally{
+    busy=false;$("sendBtn").disabled=false;$("sendBtn").classList.remove("loading");$("input").focus();
+  }
+}
+$("files").addEventListener("change",e=>{pendingFiles.push(...e.target.files);e.target.value="";renderFilebar()});
+$("sendBtn").onclick=send;$("newBtn").onclick=newConversation;$("deleteBtn").onclick=deleteConversation;
+$("input").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send()}});
+$("reloadBtn").onclick=async()=>{
+  if(busy)return;setNotice("正在重新加载最新 Adapter…");
+  try{await api("/api/reload-model",{method:"POST"});await loadStatus();setNotice("模型已重新加载。")}catch(e){setNotice(e.message,true);await loadStatus()}
+};
+(async()=>{await loadStatus();await loadConversations(true);if(!currentConversation)await newConversation()})();
+</script>
+</body>
+</html>
