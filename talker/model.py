@@ -124,8 +124,23 @@ class TalkerModel:
     def _context(self, messages: list[dict], max_chars: int) -> tuple[str, list[str]]:
         selected = messages[-MAX_HISTORY_MESSAGES:]
         pieces: list[str] = []
-        images: list[str] = []
         total = 0
+
+        # Keep conversation text in chronological order, but select images from
+        # newest to oldest so a follow-up refers to the most recent visual input.
+        newest_images: list[str] = []
+        for message in reversed(selected):
+            for attachment in reversed(message.get("attachments", [])):
+                for image_path in reversed(attachment.get("images", [])):
+                    if Path(image_path).exists() and image_path not in newest_images:
+                        newest_images.append(image_path)
+                        if len(newest_images) >= MAX_IMAGES:
+                            break
+                if len(newest_images) >= MAX_IMAGES:
+                    break
+            if len(newest_images) >= MAX_IMAGES:
+                break
+        images = list(reversed(newest_images))
 
         for message in selected:
             role = "User" if message["role"] == "user" else "Assistant"
@@ -137,9 +152,6 @@ class TalkerModel:
                     attachment_parts.append(
                         f"[Attachment: {attachment['filename']}]\n{parsed[:4000]}"
                     )
-                for image_path in attachment.get("images", []):
-                    if len(images) < MAX_IMAGES and Path(image_path).exists():
-                        images.append(image_path)
 
             block = f"{role}: {content}"
             if attachment_parts:
