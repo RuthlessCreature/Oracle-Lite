@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.2 - 2026-09-29
+
+- Removed Talker's fixed total answer-token ceiling.
+- Generation remains bounded per call (768 tokens; 384 in OOM fallback) but continues chunk-by-chunk until EOS/completion.
+- Complete answer text is stored outside the model prompt; only an 8,000-character rolling tail is fed back for continuation, preventing prompt/KV growth from scaling with total answer length.
+- Added overlap trimming so continuation chunks do not duplicate their boundary text.
+- Added content-level runaway protection: repeated/empty/non-growing continuation chunks stop generation without imposing a length cap.
+- Long enumerations such as full FAI reviews can therefore continue until the model finishes rather than stopping at an arbitrary global token count.
+
 ## 0.6.1 - 2026-09-29
 
 - Removed Talker's 384-token hard answer ceiling.
