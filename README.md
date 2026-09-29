@@ -2,7 +2,7 @@
 
 Local-first **multimodal** dataset factory and domain-model training pipeline.
 
-Oracle-Lite V0.6.0 is built around these fixed assumptions:
+Oracle-Lite V0.6.2 is built around these fixed assumptions:
 
 - corpus files live in one continuously changing local folder;
 - text, images, PDF pages, Word media and PowerPoint media are first-class source material;
@@ -272,7 +272,7 @@ Hash reuse remains unchanged: if path + size + nanosecond mtime match the regist
 
 ## Talker: local multimodal Web chat
 
-Oracle-Lite V0.6.0 includes a separate `talker/` runtime for chatting with the
+Oracle-Lite V0.6.2 includes a separate `talker/` runtime for chatting with the
 trained LoRA adapter without modifying training state.
 
 Configuration:
@@ -328,8 +328,10 @@ Talker provides:
 - latest-Adapter reload from the Web UI;
 - a 512 MiB per-file upload ceiling;
 - recent-image prioritization and bounded conversation context;
-- automatic long-answer continuation in bounded generation chunks instead of a 384-token hard cut;
-- up to 3,072 generated tokens for complete lists/reviews before the global safety ceiling;
+- automatic long-answer continuation in bounded generation chunks;
+- no fixed total answer-token ceiling: Talker continues until EOS/completion;
+- only a rolling continuation tail is re-fed to the model, so very long answers do not make each inference prompt grow without bound;
+- repeated/non-growing continuation detection prevents runaway loops without imposing a length limit;
 - CUDA OOM retry with reduced context/image count.
 
 Talker stores only its own local state under `talker/state/`; it **reads** the
