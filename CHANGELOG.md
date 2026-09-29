@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.0 - 2026-09-29
+
+- Added root-level `talker/` local multimodal Web chat runtime.
+- Added one-field `talker/talker.yaml` configuration pointing at the training output directory.
+- Automatically discovers the newest usable `adapter-final` or checkpoint and resolves its matching local Base model.
+- Loads Qwen3.5 Base in 4-bit plus the LoRA adapter for local multimodal inference.
+- Added persistent SQLite conversation history with create/switch/delete flows.
+- Added Web text chat, multi-file attachment upload and recent-image visual context.
+- Added bounded attachment extraction for PDF, DOCX, PPTX, TXT/MD/CSV, JSON/JSONL, STEP/STP and Parasolid X_T/X_B.
+- Added `oracle-talker`, `python -m talker` and `bash talker/start.sh` launch paths.
+- Talker runtime state is isolated under `talker/state/` and never writes into training output.
+- Added Web model status and latest-Adapter reload.
+- Added conservative 4-bit inference memory limits and one CUDA-OOM retry with reduced context.
+
 ## 0.5.5 - 2026-09-28
 
 - Added an explicit RTX 4080 runtime VRAM headroom policy after a real first training step reached only ~31 MiB free VRAM.
