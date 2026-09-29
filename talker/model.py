@@ -208,8 +208,8 @@ class TalkerModel:
         max_new_tokens: int,
         max_images: int,
         assistant_prefix: str = "",
-    ) -> tuple[str, bool]:
-        """Generate one bounded chunk and report whether the token cap was hit."""
+    ) -> tuple[str, bool, int]:
+        """Generate one bounded chunk and report stop reason plus token count."""
         torch = self.torch
         context, image_paths = self._context(messages, max_context_chars)
         image_paths = image_paths[-max_images:] if max_images else []
@@ -272,7 +272,7 @@ class TalkerModel:
                 generated_count >= max_new_tokens
                 and (last_token is None or last_token not in self._eos_ids())
             )
-            return text, hit_limit
+            return text, hit_limit, generated_count
         finally:
             for image in images:
                 try:
@@ -298,7 +298,7 @@ class TalkerModel:
         while estimated_tokens < total_tokens:
             allowance = min(chunk_tokens, total_tokens - estimated_tokens)
             prefix = "".join(parts)
-            chunk, hit_limit = self._generate_once(
+            chunk, hit_limit, generated_count = self._generate_once(
                 messages,
                 max_context_chars=max_context_chars,
                 max_new_tokens=allowance,
@@ -309,10 +309,7 @@ class TalkerModel:
                 break
 
             parts.append(chunk)
-            # The generation call itself knows the exact count, but keeping that
-            # tensor around would retain GPU memory. Character/4 is conservative
-            # enough for deciding the next bounded chunk.
-            estimated_tokens += max(1, len(chunk) // 4)
+            estimated_tokens += max(1, generated_count)
 
             if not hit_limit:
                 break
