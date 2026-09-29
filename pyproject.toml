@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oracle-lite"
-version = "0.5.5"
+version = "0.6.0"
 description = "Local-first multimodal dataset factory and incremental domain-model training pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,6 +33,17 @@ train = [
   "peft>=0.15",
   "bitsandbytes>=0.45",
 ]
+talk = [
+  "torch>=2.6",
+  "torchvision>=0.21",
+  "transformers>=5.11",
+  "accelerate>=1.0",
+  "peft>=0.15",
+  "bitsandbytes>=0.45",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.34",
+  "python-multipart>=0.0.20",
+]
 dev = [
   "pytest>=8.0",
   "pytest-timeout>=2.3",
@@ -41,9 +52,10 @@ dev = [
 
 [project.scripts]
 oracle-lite = "oracle_lite.cli:app"
+oracle-talker = "talker.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["oracle_lite*"]
+include = ["oracle_lite*", "talker*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

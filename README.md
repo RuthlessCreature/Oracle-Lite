@@ -2,7 +2,7 @@
 
 Local-first **multimodal** dataset factory and domain-model training pipeline.
 
-Oracle-Lite V0.5.0 is built around these fixed assumptions:
+Oracle-Lite V0.6.0 is built around these fixed assumptions:
 
 - corpus files live in one continuously changing local folder;
 - text, images, PDF pages, Word media and PowerPoint media are first-class source material;
@@ -268,6 +268,65 @@ Oracle-Lite V0.4.4 uses **admission control**. Resource pressure is handled befo
 - Dataset training uses local JSONL streaming instead of Arrow materialization.
 
 Hash reuse remains unchanged: if path + size + nanosecond mtime match the registry, Oracle-Lite reuses the existing SHA-256 without reading the full file again.
+
+
+## Talker: local multimodal Web chat
+
+Oracle-Lite V0.6.0 includes a separate `talker/` runtime for chatting with the
+trained LoRA adapter without modifying training state.
+
+Configuration:
+
+```yaml
+# talker/talker.yaml
+training_output_dir: "/home/cyg/Oracle/output3Suite"
+```
+
+`training_output_dir` may point at the Oracle-Lite output root, a training
+directory, or an adapter directory. Talker recursively discovers the newest
+usable `adapter-final` or checkpoint, reads its `run.json` when available,
+and resolves the matching local Base model automatically.
+
+Install Talker dependencies:
+
+```bash
+python -m pip install -U -e ".[talk]"
+```
+
+One-click local launch:
+
+```bash
+oracle-talker
+```
+
+Equivalent forms:
+
+```bash
+python -m talker
+bash talker/start.sh
+```
+
+The browser opens automatically on localhost, starting at port 7870 and choosing
+another local port if needed.
+
+Talker provides:
+
+- Base + LoRA 4-bit multimodal inference;
+- persistent SQLite conversation history;
+- new / switch / delete conversations;
+- text chat and multi-file upload;
+- direct image vision input;
+- bounded PDF text + page-image extraction;
+- DOCX / PPTX bounded XML/media extraction;
+- TXT / Markdown / CSV / JSON / JSONL context;
+- STEP / STP / Parasolid X_T / X_B mechanical-CAD context;
+- latest-Adapter reload from the Web UI;
+- a 512 MiB per-file upload ceiling;
+- recent-image prioritization and bounded conversation context;
+- CUDA OOM retry with reduced context/image count.
+
+Talker stores only its own local state under `talker/state/`; it **reads** the
+training output but never writes into the adapter/training directories.
 
 ## Advanced/manual commands
 

@@ -18,7 +18,7 @@ jobs:
       - name: Test
         run: pytest -q
       - name: Compile
-        run: python -m compileall -q oracle_lite
+        run: python -m compileall -q oracle_lite talker
       - name: Dashboard JavaScript syntax
         run: |
           python - <<'PY'
@@ -30,3 +30,14 @@ jobs:
           Path("/tmp/oracle-dashboard.js").write_text(match.group(1), encoding="utf-8")
           PY
           node --check /tmp/oracle-dashboard.js
+      - name: Talker JavaScript syntax
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          html = Path("talker/static/index.html").read_text(encoding="utf-8")
+          match = re.search(r"<script>(.*?)</script>", html, re.S)
+          assert match, "talker script missing"
+          Path("/tmp/oracle-talker.js").write_text(match.group(1), encoding="utf-8")
+          PY
+          node --check /tmp/oracle-talker.js
