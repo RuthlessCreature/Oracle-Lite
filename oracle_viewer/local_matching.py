@@ -3906,11 +3906,20 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
         anchors=[];placement_modes=['model_view_ray']*len(markers)
         if len(hits)==len(markers) and not collapsed_groups_have_rigid_fit:
             for index,(marker,anchor) in enumerate(hits):
-                if any(np.linalg.norm(np.asarray(anchor['position'])-np.asarray(previous['position']))<1e-5
-                       for previous in anchors[:index]):
+                duplicate_indices=[previous_index for previous_index,previous in enumerate(anchors[:index])
+                    if np.linalg.norm(np.asarray(anchor['position'])-
+                        np.asarray(previous['position']))<1e-5]
+                if duplicate_indices:
+                    duplicate_markers=[markers[previous_index] for previous_index in duplicate_indices]+[marker]
+                    duplicate_names=list(dict.fromkeys(name for duplicate in duplicate_markers
+                        for name in duplicate.get('source_point_names',[])))
                     failure_diagnostic={'reason':'duplicate_marker_positions',
                         'feature':marker.get('feature'),'view_id':marker.get('view_id'),
-                        'uv':marker.get('uv')}
+                        'uv':marker.get('uv'),'source_point_names':duplicate_names,
+                        'missed_marker_points':[{'feature':duplicate.get('feature'),
+                            'source_point_names':duplicate.get('source_point_names'),
+                            'view_id':duplicate.get('view_id'),'uv':duplicate.get('uv')}
+                            for duplicate in duplicate_markers]}
                     hits=[]
                     break
                 anchors.append(anchor)
@@ -4115,6 +4124,14 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                 'registration_point_count':len(registration_hits),
                 'rigid_fit_scopes':{str(scope):{'max_residual_mm':fit.get('max_residual_mm')}
                                     for scope,fit in rigid_fits.items()}}
+            if visual_point_chunks:
+                retry_names=_diagnostic_source_point_names(
+                    diagnostic,[point['name'] for point in known_source_points])
+                if retry_names:
+                    visual_chunk_cache={index:result for index,result in visual_chunk_cache.items()
+                        if not retry_names.intersection(point['name'] for point in visual_point_chunks[index])}
+                else:
+                    visual_chunk_cache.clear()
             retry_images=model_images
             surface_candidates=list(proactive_surface_candidates)
             try:
