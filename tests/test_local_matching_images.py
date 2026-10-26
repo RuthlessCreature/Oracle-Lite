@@ -341,6 +341,16 @@ def test_singular_source_point_and_placed_decision_normalize_without_guessing():
         {'from_source_point_name':'THICK_J01','to_source_point_name':'THICK_J01'}]
 
 
+def test_placement_decision_alias_normalizes_but_still_requires_geometry_validation():
+    parsed={'decision':'PLACEMENT','markers':[{'source_point_name':'THICK_J01',
+        'candidate_id':'C7'}]}
+    normalized,aliases=_normalize_model_source_aliases(parsed,[{'name':'THICK_J01'}],{14})
+    assert normalized['decision']=='AUTO_MARK'
+    assert normalized['markers'][0]['source_point_names']==['THICK_J01']
+    assert aliases[0]=={'from_decision':'PLACEMENT','to_decision':'AUTO_MARK'}
+    assert normalized['markers'][0]['candidate_id']=='C7'
+
+
 def test_ambiguous_or_prose_feature_does_not_fill_source_point_names():
     parsed={'markers':[{'feature':'PNT_P2','view_id':'+Z','uv':[.5,.5]},
                        {'feature':'top left point','view_id':'+Z','uv':[.5,.6]}]}

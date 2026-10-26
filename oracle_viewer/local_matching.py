@@ -2185,9 +2185,10 @@ def _normalize_model_source_aliases(parsed, known_source_points, allowed_source_
         return value
     changed=[]
     result=dict(parsed)
-    if result.get('decision')=='PLACED':
+    if result.get('decision') in ('PLACED','PLACEMENT'):
+        original_decision=result['decision']
         result['decision']='AUTO_MARK'
-        changed.append({'from_decision':'PLACED','to_decision':'AUTO_MARK'})
+        changed.append({'from_decision':original_decision,'to_decision':'AUTO_MARK'})
     for field,key_field in (('markers','source_point_names'),
                             ('registration_points','source_point_name'),
                             ('coordinate_choices','name')):
