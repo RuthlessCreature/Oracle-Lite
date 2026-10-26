@@ -28,6 +28,7 @@ from .cad_view_atlas import _valid_triangles
 from .section_geometry import closest_plane_section
 from .feature_view_candidates import feature_view_candidates
 from .spacing_candidates import evenly_spaced_candidates
+from .msop_tables import feature_coordinate_rows
 
 
 VIEWER_LOCATION_TASK=(
@@ -2184,6 +2185,9 @@ def _normalize_model_source_aliases(parsed, known_source_points, allowed_source_
         return value
     changed=[]
     result=dict(parsed)
+    if result.get('decision')=='PLACED':
+        result['decision']='AUTO_MARK'
+        changed.append({'from_decision':'PLACED','to_decision':'AUTO_MARK'})
     for field,key_field in (('markers','source_point_names'),
                             ('registration_points','source_point_name'),
                             ('coordinate_choices','name')):
@@ -2197,6 +2201,14 @@ def _normalize_model_source_aliases(parsed, known_source_points, allowed_source_
             row=dict(row)
             if field=='markers':
                 names=row.get(key_field)
+                if not names and isinstance(row.get('source_point_name'),str):
+                    singular=row['source_point_name'].strip()
+                    canonical_singular=_canonical_source_point_alias(singular)
+                    resolved=(singular if singular in expected else aliases.get(canonical_singular))
+                    if resolved is not None:
+                        names=[resolved]
+                        changed.append({'from_source_point_name':singular,
+                            'to_source_point_name':resolved})
                 # Some vision responses put the exact MSOP point identifier
                 # in `feature` but omit the contract's source_point_names
                 # field. Recover only a unique, exact/canonical source name;
@@ -2227,6 +2239,69 @@ def _normalize_model_source_aliases(parsed, known_source_points, allowed_source_
     pages=result.get('source_pages')
     if isinstance(pages,list):result['source_pages']=[page_alias(v) for v in pages]
     return result,changed
+
+
+def _attach_explicit_source_xy(source_points,methods):
+    """Attach literal MSOP X/Y table rows without inventing the missing Z axis."""
+    by_name={}
+    for page in methods or []:
+        for row in feature_coordinate_rows(page):
+            if row.get('axes')!=['X','Y']:
+                continue
+            try:values=[float(value) for value in row.get('values',[])]
+            except (TypeError,ValueError):continue
+            if len(values)!=2 or not np.isfinite(values).all():continue
+            value=dict(axes=['X','Y'],values=values,
+                coordinate_system=row.get('coordinate_system'),page=row.get('source_page'),
+                coordinate_frame_source=row.get('coordinate_frame_source'),
+                original_row=row.get('original_row'))
+            key=(tuple(round(v,9) for v in values),value['coordinate_system'],value['page'])
+            if key not in {old['_key'] for old in by_name.setdefault(row['name'],[])}:
+                by_name[row['name']].append({**value,'_key':key})
+    aliases={}
+    for name,rows in by_name.items():
+        aliases.setdefault(_canonical_source_point_alias(name),[]).append((name,rows))
+    output=[]
+    for point in source_points:
+        row=dict(point);name=row.get('name');key=_canonical_source_point_alias(name)
+        matches=aliases.get(key,[]) if key else []
+        if len(matches)==1:
+            values=matches[0][1]
+            clean=[{k:v for k,v in value.items() if k!='_key'} for value in values]
+            if len(clean)==1:
+                row['source_coordinates_2d']=clean[0]
+            elif clean:
+                row['source_coordinate_variants_2d']=clean
+        output.append(row)
+    return output
+
+
+def _explicit_coincident_xy_z_distance_pairs(methods,source_points):
+    """Find source-documented XY-coincident pairs measured along the Z axis."""
+    xy={point.get('name'):point.get('source_coordinates_2d') for point in source_points
+        if isinstance(point.get('source_coordinates_2d'),dict)}
+    names=list(xy)
+    pairs=_explicit_source_point_relations(methods,names)
+    result=[]
+    for pair in pairs:
+        left,right=(xy.get(name) for name in pair)
+        if not left or not right or left.get('axes')!=['X','Y'] or right.get('axes')!=['X','Y']:
+            continue
+        if not np.allclose(left.get('values'),right.get('values'),atol=1e-7,rtol=0):
+            continue
+        for method in methods or []:
+            text=method.get('text','') if isinstance(method,dict) else str(method)
+            if not re.search(r'\bZ\s*[- ]?\s*distance\b|\bdistance\s+along\s+Z\b',text,re.I):
+                continue
+            if all(re.search(rf'(?<![A-Z0-9_]){re.escape(token)}(?![A-Z0-9_])',text,re.I)
+                   for token in (pair[0].split('_')[-1],pair[1].split('_')[-1])):
+                result.append({'source_point_names':pair,'source_xy':left['values'],
+                    'coordinate_system':left.get('coordinate_system') or right.get('coordinate_system'),
+                    'source_page':(method.get('page',method.get('source_page'))
+                                   if isinstance(method,dict) else None),
+                    'axis':'Z'})
+                break
+    return result
 
 
 def _explicit_source_point_relations(methods,source_point_names):
@@ -3183,6 +3258,9 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
     known_source_points,source_manifest_audit=_resolve_declared_marker_manifest_with_local_model(
         model,item['number'],detail.get('methods',[]),known_source_points,
         required_marker_count,images)
+    known_source_points=_attach_explicit_source_xy(known_source_points,detail.get('methods',[]))
+    coincident_xy_z_pairs=_explicit_coincident_xy_z_distance_pairs(
+        detail.get('methods',[]),known_source_points)
     if source_manifest_audit['status']!='not_required':
         manifest_path=store._dir(project['id'])/'automatic-learning'/(
             f"fai-source-manifest-{mesh['source_sha256'][:16]}-{item['number']}.json")
@@ -3284,7 +3362,8 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
              f"Local-model physical part identity (all anchors must belong to these selected CAD bodies): {json.dumps(part_context,ensure_ascii=False)}\n"
              f"Required distinct marker count from explicit MSOP Measure instructions: {required_marker_count or 'not explicit'}\n"
              f"Required marker groups transcribed from distinct MSOP instructions: {json.dumps(required_marker_groups,ensure_ascii=False,separators=(',',':'))}\n"
-             f"MSOP source point rows (XYZ null means no coordinate evidence; never substitute similar names): {json.dumps(known_source_points,ensure_ascii=False,separators=(',',':'))}\n"
+             f"MSOP source point rows (xyz=null means no complete 3D coordinate; source_coordinates_2d/source_coordinate_variants_2d are literal MSOP X/Y rows only and do not supply Z): {json.dumps(known_source_points,ensure_ascii=False,separators=(',',':'))}\n"
+             f"MSOP XY-coincident Z-distance pairs (distinct physical locations on separate Z surfaces; select each side from CAD evidence and do not reuse one CAD hit): {json.dumps(coincident_xy_z_pairs,ensure_ascii=False,separators=(',',':'))}\n"
              f"Local-model direct-measurement manifest confirmation: {json.dumps({k:v for k,v in source_manifest_audit.items() if k!='attempts'},ensure_ascii=False,separators=(',',':'))}\n"
              f"Local-model method classification and selected strategy: {json.dumps({k:v for k,v in evidence.get('fai_strategy',{}).items() if k in ('measurement_family','evidence_class','failure_class','next_route','reason')},ensure_ascii=False)}\n"
              f"Point names with competing coordinate variants requiring a local-model choice: {json.dumps(ambiguous_coordinate_points,ensure_ascii=False)}\n"
@@ -3323,6 +3402,13 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
         '最终还须通过整组实体复核；若点位不能从原图唯一辨认，返回 ABSTAIN。系统生成的 XYZ 是所选 CAD 交点坐标，'
         '不是 MSOP 原文坐标或计量认证。'
         if source_relation_visual_recovery else '')
+    planar_pair_instruction=(
+        'MSOP explicitly defines the following Z-distance pairs at identical X/Y coordinates: '
+        f"{json.dumps(coincident_xy_z_pairs,ensure_ascii=False,separators=(',',':'))}. "
+        'Each pair is two distinct physical points on different Z surfaces. Use the literal X/Y values to identify the shared plan location, '
+        'then select each point on its own CAD surface; use opposing +Z/-Z sight lines as needed to see both sides. '
+        'Do not mark both points on the same surface or reuse one CAD intersection. The local model must decide which source name maps to which CAD side.'
+        if coincident_xy_z_pairs else '')
     visual_candidate_source_names=sorted(set(
         source_manifest_audit.get('coordinate_evidence_missing') or []))
     proactive_visual_instruction=(
@@ -3334,6 +3420,7 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
         VIEWER_LOCATION_TASK+
         '你是负责完成本次自动标记的本地模型；你现在有权依据随附的 MSOP 原页、2D工程图、已提取 XYZ 证据和当前 CAD 六视图图集自行提出并授权一个新的 FAI 级放置。无需等待外部或人工批准。'
         +visual_only_source_instruction+
+        planar_pair_instruction+
         proactive_visual_instruction+
         '此前的坐标变换或点组审核若被标为 rejected，表示该方案已被数值门限否决，不能沿用；它不代表这个 FAI 无法定位。'
         '若附图中有彩色 XYZ 叠加，那是已被数值门限拒绝的粗略搜索提示，只帮助找到对应 CAD 特征区域；不得将它当成已验证位置。必须重新给出稀疏配准参考和完整测量点归属，程序会独立拟合并校验。'
@@ -3369,7 +3456,8 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
         # The full XYZ rows already carry the authoritative point definitions.
         compact_points=[]
         for point in known_source_points:
-            row={key:point[key] for key in ('name','xyz','program','coordinate_system','pages')
+            row={key:point[key] for key in ('name','xyz','program','coordinate_system','pages',
+                'source_coordinates_2d','source_coordinate_variants_2d')
                  if key in point}
             variants=point.get('coordinate_variants') or []
             if variants:

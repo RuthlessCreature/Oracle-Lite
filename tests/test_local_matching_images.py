@@ -16,7 +16,8 @@ from oracle_viewer.local_matching import (_method_page_images, _compact_registra
 from oracle_viewer.local_matching import (_xyz_rigid_fit_required_scopes,
     _missing_required_xyz_fits, _normalize_model_source_aliases,
     _explicit_source_point_relations, _partition_visual_source_points, _merge_visual_marker_chunks,
-    _select_coordinate_variants_with_local_model)
+    _select_coordinate_variants_with_local_model, _attach_explicit_source_xy,
+    _explicit_coincident_xy_z_distance_pairs)
 from oracle_viewer.msop_coordinates import _explicit_measure_point_names
 
 
@@ -330,6 +331,16 @@ def test_exact_feature_identifier_recovers_omitted_source_point_name_field():
     assert aliases==[{'from_feature':'R2_PNT_P2','to_source_point_name':'R2_PNT_P2'}]
 
 
+def test_singular_source_point_and_placed_decision_normalize_without_guessing():
+    parsed={'decision':'PLACED','markers':[{'source_point_name':'THICK_J01',
+        'candidate_id':'C7','view_id':'+Z','uv':[.45,.55]}]}
+    normalized,aliases=_normalize_model_source_aliases(parsed,[{'name':'THICK_J01'}],{14})
+    assert normalized['decision']=='AUTO_MARK'
+    assert normalized['markers'][0]['source_point_names']==['THICK_J01']
+    assert aliases==[{'from_decision':'PLACED','to_decision':'AUTO_MARK'},
+        {'from_source_point_name':'THICK_J01','to_source_point_name':'THICK_J01'}]
+
+
 def test_ambiguous_or_prose_feature_does_not_fill_source_point_names():
     parsed={'markers':[{'feature':'PNT_P2','view_id':'+Z','uv':[.5,.5]},
                        {'feature':'top left point','view_id':'+Z','uv':[.5,.6]}]}
@@ -424,6 +435,33 @@ def test_explicit_msop_point_pairs_stay_together_when_large_group_is_chunked():
     assert [[point['name'] for point in chunk] for chunk in chunks]==[
         [name for i in range(1,6) for name in (f'THICK_J{i:02}',f'THICK_A{i:02}')],
         ['THICK_J06','THICK_A06']]
+
+
+def test_literal_msop_xy_rows_are_attached_without_fabricating_z_and_identify_z_pairs():
+    method={'page':14,'text':'''Output system ALI_ABC
+Features X Y
+THICK_J01 12.5 34.0 THICK_A01 12.5 34.0
+THICK_J02 18.0 34.0 THICK_A02 18.1 34.0
+Output Z distance (1x) from point to point (J01-A01).'''}
+    points=[{'name':name,'xyz':None} for name in
+        ('THICK_J01','THICK_A01','THICK_J02','THICK_A02')]
+    attached=_attach_explicit_source_xy(points,[method])
+    assert attached[0]['source_coordinates_2d']=={
+        'axes':['X','Y'],'values':[12.5,34.0],'coordinate_system':'ALI_ABC',
+        'page':14,'coordinate_frame_source':'explicit_output_system_table',
+        'original_row':'THICK_J01 12.5 34.0 THICK_A01 12.5 34.0'}
+    assert all('z' not in row.get('source_coordinates_2d',{}) for row in attached)
+    pairs=_explicit_coincident_xy_z_distance_pairs([method],attached)
+    assert pairs==[{'source_point_names':['THICK_J01','THICK_A01'],
+        'source_xy':[12.5,34.0],'coordinate_system':'ALI_ABC',
+        'source_page':14,'axis':'Z'}]
+
+
+def test_xy_pair_extraction_does_not_assume_z_relation_or_pair_noncoincident_points():
+    method={'page':14,'text':'Output Y distance (1x) (J01-A01).'}
+    points=[{'name':'THICK_J01','source_coordinates_2d':{'axes':['X','Y'],'values':[1,2]}},
+            {'name':'THICK_A01','source_coordinates_2d':{'axes':['X','Y'],'values':[1,2.01]}}]
+    assert _explicit_coincident_xy_z_distance_pairs([method],points)==[]
 
 
 def test_small_visual_chunk_requires_candidate_id_when_an_exact_hit_option_exists():
