@@ -102,3 +102,35 @@ def test_unconfirmed_part_screening_persists_failure_evidence_for_downstream_rev
     assert audit['receipt'] and (tmp_path/'automatic-learning'/'part-selections').is_dir()
     saved=json.load(open(audit['receipt']))
     assert saved['screening'][0]['raw_output'] and saved['does_not_authorize_measurement_anchors']
+
+
+def test_invalid_body_batch_is_recorded_but_does_not_abort_full_catalog_review(tmp_path):
+    m={'source_sha256':'large','faces':[{'id':f'f{i}','body':i,
+        'positions':[i*2,0,0,i*2+1,0,0,i*2,1,0],'indices':[0,1,2]} for i in range(1,70)]}
+    batch_number=0
+    class Model:
+        def _generate_once(self,messages,**kwargs):
+            nonlocal batch_number
+            payload=json.loads(messages[0]['attachments'][0]['parsed_text'])
+            if 'visible_parts' in payload:
+                batch_number+=1
+                ids=[part['part_id'] for part in payload['visible_parts']]
+                # The second batch hallucinates B1, which it was not shown.
+                selected=(['B1'] if batch_number==1 else
+                    ['B1'] if batch_number==2 else [])
+                return json.dumps({'decision':'SCREEN_PARTS','fai':4,
+                    'part_ids':selected,'evidence':'Shape and source comparison.'}),False,40
+            if 'all_original_bodies' in payload:
+                assert len(payload['all_original_bodies'])==69
+                return json.dumps({'decision':'SELECT_HOST_PARTS','fai':4,'part_ids':['B2'],
+                    'evidence':'Full body table and source feature comparison.'}),False,40
+            return json.dumps({'decision':'SELECT_PARTS','fai':4,'part_ids':['B2'],
+                'source_feature':'Rail','evidence':'Selected body matches the source feature.',
+                'confidence':'low'}),False,40
+    parts,audit=select_physical_parts(SimpleNamespace(_dir=lambda _:tmp_path),{'id':'p'},
+        {'number':4},{'methods':[]},Model(),m,['original-msop.png'])
+    assert [part['part_id'] for part in parts]==['B2']
+    assert audit['screening'][0]['valid'] is True
+    assert audit['screening'][1]['valid'] is False
+    assert audit['screening'][2]['valid'] is True
+    assert audit['screening'][3]['stage']=='global_host_comparison'

@@ -161,12 +161,15 @@ def select_physical_parts(store,project,item,detail,model,mesh,source_images,*,g
                 and len(ids)==len(set(ids)) and bool(response.get('evidence')))
             screening.append({'visible_part_ids':sorted(valid_ids),'raw_output':raw,'truncated':cut,
                 'valid':bool(valid),'catalog_images':batch_pages})
-            if not valid:return None,_persist_part_selection(store,project,item,mesh,{'status':'unconfirmed',
-                'reason':'local_part_screening_invalid','screening':screening})
+            # One malformed batch must not discard valid candidates from
+            # earlier batches or prevent the independent full-catalog review.
+            # Keep the bad response in the receipt, but never use its IDs.
+            if not valid:continue
             candidates.extend(part for part in batch if part['part_id'] in ids)
-        if not candidates:return None,_persist_part_selection(store,project,item,mesh,{'status':'unconfirmed',
-            'reason':'local_model_found_no_part_candidates','screening':screening})
-        parts=candidates
+        # If every batch abstains or returns malformed IDs, the global model
+        # still gets the complete source-linked body table and may recover a
+        # shortlist. No batch output itself authorizes a body.
+        parts=candidates if candidates else all_parts
         pages=render_part_catalog(mesh,parts,store._dir(project['id'])/'automatic-learning'/'part-catalog')
         images=list(dict.fromkeys([*source_images,*pages]))
         if screening:
