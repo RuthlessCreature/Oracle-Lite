@@ -2706,7 +2706,8 @@ def _diagnostic_source_point_names(rows,known_names):
 
 
 def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_points,
-                                 allowed_source_pages,surface_candidates=(),temperature=0.,max_repairs=2):
+                                 allowed_source_pages,surface_candidates=(),global_source_points=None,
+                                 temperature=0.,max_repairs=2):
     """Ask the native model to repair only a malformed subset response.
 
     A genuine abstention stays an abstention. No valid neighboring chunks are
@@ -2721,8 +2722,13 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
         for view in candidate.get('blocked_view_ids_by_source_name',{}).get(name,[])})
         for name in expected_names}
     blocked={name:views for name,views in blocked.items() if views}
-    source_xy_layout=_source_xy_layout_evidence(source_points,expected_names)
-    candidate_geometry=_surface_candidate_geometry_evidence(surface_candidates,expected_names)
+    layout_points=global_source_points or source_points
+    layout_names=[point.get('name') for point in layout_points
+        if isinstance(point,dict) and isinstance(point.get('name'),str)]
+    source_xy_layout=_source_xy_layout_evidence(
+        layout_points,layout_names if global_source_points is not None else expected_names)
+    candidate_geometry=_surface_candidate_geometry_evidence(surface_candidates,
+        layout_names if source_xy_layout and global_source_points is not None else expected_names)
     contract=('\nCurrent subset output contract: markers must cover ONLY '+json.dumps(expected_names)+
         ', each name exactly once. Do not add a point from another subset to close a loop or build a plane. '+
         'Full-group totals in the source apply after the service merges all subsets. '+
@@ -3869,7 +3875,10 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                     # point-specific candidate IDs legible instead of stacking
                     # dozens of IDs at each shared CAD sample in one image.
                     if point_candidate_images:
-                        chunk_images=list(dict.fromkeys([*source_images[:2],*point_candidate_images]))[:8]
+                        global_geometry_images=([str(candidate_atlas)]
+                            if coincident_xy_z_pairs and candidate_atlas.is_file() else [])
+                        chunk_images=list(dict.fromkeys([
+                            *source_images[:2],*global_geometry_images,*point_candidate_images]))[:8]
                         chunk_attachments=[{'filename':'MSOP and point-specific six-view CAD candidate atlases',
                             'parsed_text':context,'images':chunk_images}]
                 chunk_message={'role':'user','content':messages[0]['content']+chunk_instruction,
@@ -3880,6 +3889,7 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                             expected_names=chunk_names,source_points=[point for point in known_source_points
                                 if point.get('name') in chunk_names],
                             allowed_source_pages=allowed_source_pages,surface_candidates=chunk_surface_candidates,
+                            global_source_points=(known_source_points if coincident_xy_z_pairs else None),
                             temperature=min(.35,.12*attempt)))
                 except Exception as exc:
                     chunk_results.append(None)
