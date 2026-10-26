@@ -63,7 +63,8 @@ def test_large_direct_point_group_expands_candidate_pool_per_view(monkeypatch):
     options=matching._source_visual_search_candidates(mesh(),[f'PNT_{index}' for index in range(12)])
     counts={row['view_id'] for row in options}
     assert limits==[12]
-    assert counts=={'+Z'} and len(options)==12*12
+    assert counts=={'+Z'} and len(options)==12
+    assert all(len(row['source_point_names'])==12 for row in options)
 
 
 def test_visual_surface_candidates_are_scoped_to_each_source_point_host():
@@ -92,17 +93,14 @@ def test_candidate_sampling_filters_to_host_before_limiting_each_view(monkeypatc
     assert len(options)==6 and all(row['face_id']=='small-rail' for row in options)
 
 
-def test_shared_host_candidates_keep_source_specific_ids_for_distinct_points():
+def test_shared_host_candidates_use_one_id_per_physical_hit():
     options=_source_visual_search_candidates(mesh(),['P_RAIL_A','P_RAIL_B'],
         allowed_face_ids_by_source_name={'P_RAIL_A':{'right'},'P_RAIL_B':{'right'}})
     assert options
-    assert all(row['source_point_names'] in (['P_RAIL_A'],['P_RAIL_B']) for row in options)
-    assert {tuple(row['source_point_names']) for row in options}=={('P_RAIL_A',),('P_RAIL_B',)}
-    left=[row for row in options if row['source_point_names']==['P_RAIL_A']]
-    right=[row for row in options if row['source_point_names']==['P_RAIL_B']]
-    signature=lambda row:(row['view_id'],tuple(row['uv']),row['face_id'],tuple(row['position']))
-    assert [signature(row) for row in left]==[signature(row) for row in right]
-    assert {row['id'] for row in left}.isdisjoint({row['id'] for row in right})
+    assert all(row['source_point_names']==['P_RAIL_A','P_RAIL_B'] for row in options)
+    assert len({row['id'] for row in options})==len(options)
+    assert len({(row['view_id'],tuple(row['uv']),row['face_id'],tuple(row['position']))
+                for row in options})==len(options)
 
 
 def test_resolved_marker_face_must_match_source_points_selected_host():

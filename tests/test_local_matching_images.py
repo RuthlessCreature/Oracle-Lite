@@ -21,6 +21,58 @@ from oracle_viewer.local_matching import (_xyz_rigid_fit_required_scopes,
 from oracle_viewer.msop_coordinates import _explicit_measure_point_names
 
 
+def test_viewer_location_prompt_distinguishes_geometric_measurement_points_from_test_objects():
+    prompt=local_matching.VIEWER_LOCATION_TASK
+    assert '平面度、直线度、轮廓度、位置度' in prompt
+    assert '每个测量向量点都必须映射到 CAD' in prompt
+    assert '这些测点不是焊点、螺母或力学试验对象' in prompt
+    assert '原文XYZ、坐标系、实体与整组几何校验仍须一致' in prompt
+
+
+def test_global_surface_hits_keep_one_id_and_list_all_eligible_source_points():
+    candidates=[{'view_id':'+Z','uv':[.25,.4],'position':[1.0,2.0,3.0],
+        'face_id':'face-1','source_point_names':[]}]
+    scoped=local_matching._scope_global_surface_candidates(
+        candidates,['P1','P2','P3'],first_id=40)
+    assert [row['id'] for row in scoped]==[40]
+    assert [row['source_point_names'] for row in scoped]==[['P1','P2','P3']]
+    assert all(row['position']==[1.0,2.0,3.0] for row in scoped)
+
+
+def test_large_joint_candidate_pool_stays_inside_strata_context_budget():
+    names=[f'DATUMA_U{i:02d}' for i in range(1,11)]
+    candidates=[]
+    views=('+Z','-Z','+X','-X','+Y','-Y')
+    for index in range(144):
+        candidates.append({'id':index+1,'view_id':views[index%6],
+            'uv':[.1+(index%12)*.065,.1+(index//12)*.065],
+            'position':[float(index),float(index%9),float(index%5)],
+            'face_id':f'face-{index}','source_point_names':names,
+            'candidate_role':'global_surface_search',
+            'blocked_uvs_by_source_name':{name:[{'view_id':'+Z','uv':[.5,.5]}]
+                for name in names}})
+    source_points=[{'name':name,'xyz':[float(i),float(i%7),2.5],
+        'program':'UP','coordinate_system':'ALI_ABC'}
+        for i,name in enumerate(names,1)]
+    class Model:
+        called=False
+        def _generate_once(self,messages,**kwargs):
+            self.called=True
+            assert kwargs['max_context_chars']<58000
+            assert 'candidate_options' in messages[0]['content']
+            return json.dumps({'decision':'ABSTAIN','fai':7,'markers':[]}),False,32
+    model=Model()
+    parsed,_,truncated,_,_,attempts=local_matching._request_visual_marker_chunk(
+        model,{'role':'user','content':'FAI 7 source evidence',
+            'attachments':[{'filename':'MSOP and drawing','parsed_text':'source pages','images':['msop.png']}]},
+        fai=7,expected_names=names,source_points=source_points,
+        allowed_source_pages={26,88,89},surface_candidates=candidates,
+        global_source_points=source_points)
+    assert model.called and not truncated and parsed['decision']=='ABSTAIN'
+    assert not any('Complete local visual evidence exceeds context budget' in row.get('error','')
+        for row in attempts)
+
+
 def test_retry_context_budget_preserves_all_source_text_or_refuses_the_call():
     from talker.model import TalkerModel
     messages=[{'role':'user','content':'Initial task. '+('Additional candidate diagnostics. '*200),
@@ -44,13 +96,70 @@ def test_compact_visual_retry_keeps_complete_source_attachment_and_candidate_con
         required_marker_groups=[{'group_id':'N2','declared_count':1,'source_point_names':['N2_PNT1']}],
         surface_candidates=[{'id':7,'view_id':'-X','uv':[.4,.6],
             'source_point_names':['N2_PNT1'],
-            'blocked_view_ids_by_source_name':{'N2_PNT1':['+Z']}}],
+            'blocked_uvs_by_source_name':{'N2_PNT1':[{'view_id':'+Z','uv':[.2,.4]}]}}],
         failure_summary=[{'code':'collapsed_source_point_view_forbidden'}])
     assert local_matching._complete_visual_context_budget([compact]) < 58000
     assert compact['attachments'][0]['parsed_text']==source
     assert compact['attachments'][0]['images']==['msop.png','drawing.png']
     assert 'LAST_SOURCE_POINT' in compact['attachments'][0]['parsed_text']
-    assert 'blocked_view_ids_by_source_name' in compact['content']
+    assert 'Deduplicated blocked exact ray hits by source point' in compact['content']
+    assert '"N2_PNT1"' in compact['content'] and '"uv":[0.2,0.4]' in compact['content']
+
+
+def test_fai_retry_compaction_moves_complete_xyz_into_prompt_and_drops_duplicate_pdf_transcript():
+    original={'role':'user','content':'Verbose FAI prompt. '*1800,
+        'attachments':[{'filename':'Original MSOP and drawing','parsed_text':
+            'Duplicated full extraction. '*3000,'images':['method.png','drawing.png','cad-candidates.png']}]}
+    points=[{'name':'DATUMA_U01','xyz':[1.0,2.0,3.0],'program':'UP','coordinate_system':'ALI_ABC',
+             'pages':[88],'coordinate_variants':[{'page':88,'program':'UP',
+                'coordinate_system':'ALI_ABC','xyz':[1.0,2.0,3.0]}]},
+            {'name':'DATUMA_U02','xyz':[2.0,2.0,3.0],'program':'UP','coordinate_system':'ALI_ABC',
+             'pages':[88]}]
+    compact=local_matching._compact_visual_evidence_message(original,fai=7,
+        source_points=[points[0]],source_pages=[88],layout_source_points=points,
+        method_evidence='Measure two points on Datum A.',
+        dependency_evidence='Datum A is established from the complete point group.',
+        surface_candidates=[{'id':4,'view_id':'-Z','uv':[.4,.5],
+            'source_point_names':['DATUMA_U01']}])
+    attachment=compact['attachments'][0]
+    assert 'parsed_text' not in attachment
+    assert attachment['images']==['method.png','drawing.png','cad-candidates.png']
+    assert 'DATUMA_U02' in compact['content'] and '[2.0,2.0,3.0]' in compact['content']
+    assert 'coordinate_variants' not in compact['content'] and 'ALI_ABC' in compact['content']
+    assert 'Measure two points on Datum A.' in compact['content']
+    assert 'Datum A is established' in compact['content']
+    assert local_matching._complete_visual_context_budget([compact]) < 58000
+
+
+def test_fai_retry_keeps_genuinely_conflicting_xyz_variant():
+    point={'name':'PNT_A','xyz':[1,2,3],'program':'UP','coordinate_system':'ALI_ABC',
+        'coordinate_variants':[{'page':10,'program':'UP','coordinate_system':'ALI_ABC','xyz':[1,2,3]},
+            {'page':11,'program':'DOWN','coordinate_system':'ALI_ABD','xyz':[1,2,4]}]}
+    compact=local_matching._compact_visual_evidence_message({'role':'user','content':'verbose'},
+        fai=1,source_points=[point],source_pages=[10,11],layout_source_points=[point])
+    assert 'PNT_A' in compact['content'] and '[1,2,4]' in compact['content']
+    assert 'ALI_ABD' in compact['content'] and 'coordinate_variants' in compact['content']
+
+
+def test_fai_retry_does_not_expand_all_point_pairs_or_repeat_identical_coordinate_variants():
+    points=[{'name':f'DATUMA_U{i:02d}','xyz':[float(i),float(i%7),2.5],
+        'program':'UP','coordinate_system':'ALI_ABC','coordinate_variants':[
+            {'page':26,'program':'UP','coordinate_system':'ALI_ABC',
+             'xyz':[float(i),float(i%7),2.5]},
+            {'page':27,'program':'UP','coordinate_system':'ALI_ABC',
+             'xyz':[float(i),float(i%7),2.5]}]} for i in range(1,36)]
+    original={'role':'user','content':'x'*61000,
+        'attachments':[{'filename':'MSOP and drawing','parsed_text':'y'*30000,
+                        'images':['method.png','drawing.png']}]}
+    compact=local_matching._compact_visual_evidence_message(original,fai=7,
+        source_points=points[:10],source_pages=[26,27],layout_source_points=points,
+        method_evidence='datum and point method evidence',
+        dependency_evidence='datum frame dependency evidence')
+    encoded=compact['content']
+    assert all(point['name'] in encoded for point in points)
+    assert 'coordinate_variants' not in encoded
+    assert 'pairwise_xy_distances' not in encoded
+    assert local_matching._complete_visual_context_budget([compact]) < 58000
 
 
 def test_chunk_retry_compaction_only_includes_candidates_for_its_source_points():
@@ -66,6 +175,189 @@ def test_chunk_retry_compaction_only_includes_candidates_for_its_source_points()
     assert compact['attachments'][0]['parsed_text']=='full source text'
 
 
+@pytest.mark.parametrize('decision',['success','pass','accepted','accept','approve','approved','proceed','placed'])
+def test_positive_local_model_decision_alias_requires_exact_complete_point_coverage(decision):
+    complete={'decision':decision,'markers':[
+        {'point_name':'DATUMA_U01','candidate_id':'C1'},
+        {'point_name':'DATUMA_U02','candidate_id':'C2'}],
+        'registration_points':['DATUMA_U01','DATUMA_U02']}
+    normalized=local_matching._normalize_positive_visual_chunk_decision(
+        complete,['DATUMA_U01','DATUMA_U02'])
+    assert normalized['decision']=='AUTO_MARK'
+    assert normalized['registration_points']==[]
+    assert normalized['confidence']=='low'
+    assert all(isinstance(marker.get('source_point_names'),list) for marker in normalized['markers'])
+    incomplete={'decision':decision,'markers':[{'point_name':'DATUMA_U01'}]}
+    assert local_matching._normalize_positive_visual_chunk_decision(
+        incomplete,['DATUMA_U01','DATUMA_U02'])['decision']==decision
+    rejected={'decision':decision,'markers':[{'point_name':'DATUMA_U01','status':'rejected'}]}
+    assert local_matching._normalize_positive_visual_chunk_decision(
+        rejected,['DATUMA_U01'])['decision']==decision
+
+
+def test_compact_whole_group_geometry_feedback_preserves_failure_fields_only():
+    compact=local_matching._compact_visual_failure_feedback([
+        {'code':'registration_reference_audit_failed','details':[
+            {'source_point_name':'DATUMA_U02','reason':'rigid_fit_residual_exceeded',
+             'residual_mm':1.25,'max_residual_mm':0.75,'private_dump':'x'*400},
+            {'source_point_name':'DATUMA_U03','reason':'candidate_hit_mismatch','candidate_id':'C17'}]},
+        {'code':'source_point_coverage_incomplete','missing_names':['DATUMA_U04'],'missing_count':1}])
+    encoded=json.dumps(compact)
+    assert 'registration_reference_audit_failed' in encoded
+    assert 'DATUMA_U02' in encoded and '1.25' in encoded and 'C17' in encoded
+    assert 'DATUMA_U04' in encoded and 'private_dump' not in encoded
+
+
+def test_compact_geometry_feedback_keeps_names_of_every_missed_ray_point():
+    compact=local_matching._compact_visual_failure_feedback([{
+        'reason':'marker_view_ray_missed_CAD','view_id':'+Z','missed_marker_points':[
+            {'source_point_names':['DATUMA_U06'],'view_id':'+Z','uv':[.2,.3]},
+            {'source_point_names':['DATUMA_U16'],'view_id':'+Z','uv':[.7,.3]}]}])
+    assert compact[0]['missed_marker_points'][0]['source_point_names']==['DATUMA_U06']
+    assert compact[0]['missed_marker_points'][1]['source_point_names']==['DATUMA_U16']
+    assert compact[0]['missed_marker_points'][0]['uv']==[.2,.3]
+
+
+def test_positive_visual_aliases_are_canonicalized_only_for_complete_subset():
+    parsed={'decision':'pass','markers':[
+        {'source_point':'DATUMA_U01','cad_id':'C12','view_id':'+Z','uv':[.2,.3],
+         'cad_xyz_mm':[1,2,3],'source_page':26,'role':'registration_point'},
+        {'source_point':'DATUMA_U02','cad_id':'C14','view_id':'-X','uv':[.4,.5],
+         'source_page':26}], 'confidence':'medium'}
+    result=local_matching._normalize_positive_visual_chunk_decision(
+        parsed,['DATUMA_U01','DATUMA_U02'])
+    assert result['decision']=='AUTO_MARK'
+    assert result['markers'][0]=={'source_point_names':['DATUMA_U01'],'candidate_id':'C12',
+        'view_id':'+Z','uv':[.2,.3],'source_pages':[26]}
+    assert result['markers'][1]['source_point_names']==['DATUMA_U02']
+    assert 'cad_xyz_mm' not in result['markers'][0]
+    assert result['markers'][0]['candidate_id']=='C12'
+
+
+def test_compact_geometry_feedback_is_bounded_without_dropping_failure_code():
+    details=[{'source_point_name':f'DATUMA_U{i:02d}','reason':'rigid_fit_residual_exceeded',
+        'residual_mm':i/10,'max_residual_mm':.75,'message':'offset explanation '*10}
+        for i in range(1,80)]
+    compact=local_matching._compact_visual_failure_feedback([
+        {'code':'registration_reference_audit_failed','details':details}],max_chars=1800)
+    encoded=json.dumps(compact,ensure_ascii=False,separators=(',',':'))
+    assert len(encoded)<=1800
+    assert 'registration_reference_audit_failed' in encoded
+    assert 'DATUMA_U01' in encoded and 'DATUMA_U79' not in encoded
+
+
+def test_candidate_geometry_compaction_is_scoped_to_the_current_model_chunk():
+    candidates=[
+        {'id':1,'view_id':'+Z','uv':[.3,.4],'position':[1,2,3],
+         'source_point_names':['P1','P2']},
+        {'id':2,'view_id':'-X','uv':[.7,.8],'position':[4,5,6],
+         'source_point_names':['P3']},
+    ]
+    evidence=local_matching._surface_candidate_geometry_evidence(candidates,['P1'])
+    encoded=json.dumps(evidence)
+    assert 'C1' in encoded and 'P1' in encoded
+    assert 'C2' not in encoded and '[4.0, 5.0, 6.0]' not in encoded
+
+
+def test_explicit_same_xy_z_distance_points_require_a_side_view_for_each_location():
+    source=[{'name':'DATUMA_U09','xyz':[4,7,2], 'program':'DOWN','coordinate_system':'ALI_ABD'},
+        {'name':'DATUMA_U27','xyz':[4,7,9], 'program':'DOWN','coordinate_system':'ALI_ABD'}]
+    markers=[{'source_point_names':['DATUMA_U09'],'view_id':'+Z','uv':[.4,.5]},
+        {'source_point_names':['DATUMA_U27'],'view_id':'+Z','uv':[.4,.5]}]
+    pair=[{'source_point_names':['DATUMA_U09','DATUMA_U27'],'source_xy':[4,7],'axis':'Z'}]
+    issues=local_matching._visual_marker_validation_issues(
+        {'decision':'AUTO_MARK','fai':7,'markers':markers},fai=7,
+        required_marker_count=2,known_source_points=source,rigid_group_possible=True,
+        candidate_selection_valid=True,coordinate_choices_valid=True,truncated=False,
+        coincident_xy_z_pairs=pair)
+    collapsed=next(row for row in issues if row['code']=='coincident_xy_z_pair_view_collapsed')
+    assert collapsed['details']==[{'source_point_names':['DATUMA_U09','DATUMA_U27'],
+        'selected_views':['+Z','+Z'],'reason':'z_distance_pair_requires_side_view'}]
+    markers[0].update(view_id='-X',uv=[.2,.5])
+    markers[1].update(view_id='-X',uv=[.7,.5])
+    assert not any(row['code']=='coincident_xy_z_pair_view_collapsed'
+        for row in local_matching._visual_marker_validation_issues(
+            {'decision':'AUTO_MARK','fai':7,'markers':markers},fai=7,
+            required_marker_count=2,known_source_points=source,rigid_group_possible=True,
+            candidate_selection_valid=True,coordinate_choices_valid=True,truncated=False,
+            coincident_xy_z_pairs=pair))
+
+
+def test_same_xy_z_distance_retry_feedback_keeps_pair_names_and_selected_views():
+    compact=local_matching._compact_visual_failure_feedback([
+        {'code':'coincident_xy_z_pair_view_collapsed','details':[
+            {'source_point_names':['DATUMA_U09','DATUMA_U27'],
+             'selected_views':['+Z','+Z'],'reason':'z_distance_pair_requires_side_view'}]}])
+    assert compact[0]['details'][0]=={
+        'source_point_names':['DATUMA_U09','DATUMA_U27'],
+        'selected_views':['+Z','+Z'],'reason':'z_distance_pair_requires_side_view'}
+
+
+def test_chunk_point_repair_replaces_only_failed_local_model_points_and_preserves_groups():
+    previous={'decision':'AUTO_MARK','fai':7,'confidence':'medium','evidence':'first pass',
+        'markers':[{'source_point_names':['P1'],'candidate_id':'C1'},
+            {'source_point_names':['P2','P3'],'candidate_id':'C2'},
+            {'source_point_names':['P4'],'candidate_id':'C4'}],
+        'registration_points':[{'source_point_name':name,'uv':[.1,.2]} for name in ('P1','P2','P3','P4')],
+        'coordinate_choices':[],'source_pages':[88]}
+    repaired={'decision':'AUTO_MARK','fai':7,'confidence':'low','evidence':'repaired pair',
+        'markers':[{'source_point_names':['P2'],'candidate_id':'C7'},
+            {'source_point_names':['P3'],'candidate_id':'C8'}],
+        'registration_points':[{'source_point_name':'P2','uv':[.2,.3]}],
+        'coordinate_choices':[],'source_pages':[89]}
+    merged,error=local_matching._merge_visual_chunk_point_repair(previous,repaired,{'P2'})
+    assert error is None
+    assert [row['candidate_id'] for row in merged['markers']]==['C1','C4','C7','C8']
+    assert merged['registration_points']==[
+        {'source_point_name':'P1','uv':[.1,.2]},
+        {'source_point_name':'P4','uv':[.1,.2]},
+        {'source_point_name':'P2','uv':[.2,.3]}]
+    assert merged['source_pages']==[88,89]
+    assert merged['confidence']=='low'
+
+
+def test_chunk_point_repair_rejects_missing_or_extra_local_model_points():
+    previous={'markers':[{'source_point_names':['P1'],'candidate_id':'C1'},
+        {'source_point_names':['P2','P3'],'candidate_id':'C2'}]}
+    merged,error=local_matching._merge_visual_chunk_point_repair(previous,
+        {'markers':[{'source_point_names':['P2'],'candidate_id':'C2b'}]},{'P2'})
+    assert merged is None and error['reason']=='repaired_chunk_source_coverage_incomplete'
+    merged,error=local_matching._merge_visual_chunk_point_repair(previous,
+        {'markers':[{'source_point_names':['P4'],'candidate_id':'C3'}]},{'P2'})
+    assert merged is None and error['reason']=='repaired_chunk_contains_unrequested_source_name'
+
+
+def test_visual_chunk_cache_keeps_exact_local_model_source_coverage_independent_of_candidate_ids():
+    parsed={'decision':'AUTO_MARK','fai':'FAI 7','markers':[
+        {'source_point_names':['P1'],'view_id':'+X','uv':[.2,.3]},
+        {'source_point_names':['P2'],'view_id':'-Y','uv':[.7,.8]}]}
+    assert local_matching._visual_chunk_source_coverage_valid(parsed,['P1','P2'],fai=7)
+    parsed['markers'][1]['source_point_names']=['P1']
+    assert not local_matching._visual_chunk_source_coverage_valid(parsed,['P1','P2'],fai=7)
+
+
+def test_chunk_prompt_receives_prior_whole_group_geometry_failure():
+    class Model:
+        request=None
+        def _generate_once(self,messages,**kwargs):
+            self.request=messages
+            return json.dumps({'decision':'AUTO_MARK','fai':7,'markers':[
+                {'source_point_names':['DATUMA_U01'],'view_id':'-Z','uv':[.4,.5],
+                 'feature':'DATUMA_U01','source_pages':[88]}],
+                'registration_points':[],'confidence':'low','evidence':'MSOP p.88 point.'}),False,80
+    model=Model()
+    points=[{'name':'DATUMA_U01','xyz':[1,2,3],'program':'UP','coordinate_system':'ALI_ABC'}]
+    feedback=[{'code':'registration_reference_audit_failed','details':[
+        {'source_point_name':'DATUMA_U01','reason':'rigid_fit_residual_exceeded'}]}]
+    parsed,*_=local_matching._request_visual_marker_chunk(model,
+        {'role':'user','content':'Find the point from the source evidence.'},fai=7,
+        expected_names=['DATUMA_U01'],source_points=points,global_source_points=points,
+        allowed_source_pages={88},retry_feedback=feedback)
+    assert parsed['decision']=='AUTO_MARK'
+    assert 'registration_reference_audit_failed' in model.request[0]['content']
+    assert 'DATUMA_U01' in model.request[0]['content']
+
+
 def test_validation_diagnostic_name_extraction_is_exact_and_nested():
     names=local_matching._diagnostic_source_point_names([
         {'code':'candidate_id_selection_invalid','details':[
@@ -76,7 +368,7 @@ def test_validation_diagnostic_name_extraction_is_exact_and_nested():
     assert names=={'CWS_S01','CWS_S02','CWS_N14'}
 
 
-def test_visual_chunk_compacts_prompt_on_budget_error_without_truncating_source_evidence():
+def test_visual_chunk_compacts_retry_with_complete_source_rows_when_full_transcript_exceeds_budget():
     source='Complete original MSOP coordinate table. '+('PNT XYZ row preserved. '*2200)+'LAST_XYZ_ROW'
     markers=[{'source_point_names':[name],'view_id':'+Z','uv':uv,'feature':name,'source_pages':[1]}
         for name,uv in [('A_PNT1',[.3,.4]),('A_PNT2',[.7,.6])]]
@@ -92,14 +384,16 @@ def test_visual_chunk_compacts_prompt_on_budget_error_without_truncating_source_
     model=Model()
     message={'role':'user','content':'Verbose repeated visual task. '*1200,
         'attachments':[{'filename':'MSOP and drawing','parsed_text':source,'images':['source.png']}]}
-    points=[{'name':'A_PNT1','pages':[1]},{'name':'A_PNT2','pages':[1]}]
+    points=[{'name':'A_PNT1','pages':[1],'xyz':[1,2,3],'program':'UP','coordinate_system':'ALI_ABC'},
+        {'name':'A_PNT2','pages':[1],'xyz':[4,5,6],'program':'UP','coordinate_system':'ALI_ABC'}]
     parsed,returned,truncated,tokens,_aliases,repairs=local_matching._request_visual_marker_chunk(
         model,message,fai=2,expected_names=['A_PNT1','A_PNT2'],source_points=points,
-        allowed_source_pages={1})
+        global_source_points=points,allowed_source_pages={1})
     assert not truncated and parsed['decision']=='AUTO_MARK' and tokens==100
     assert model.calls==1 and repairs[-1]['contract_issues']==[]
-    assert model.request[0]['attachments'][0]['parsed_text']==source
-    assert 'LAST_XYZ_ROW' in model.request[0]['attachments'][0]['parsed_text']
+    assert 'parsed_text' not in model.request[0]['attachments'][0]
+    assert model.request[0]['attachments'][0]['images']==['source.png']
+    assert 'A_PNT2' in model.request[0]['content'] and '[4,5,6]' in model.request[0]['content']
 
 
 def test_drawing_count_retry_requires_distinct_explicit_candidate_ids():
@@ -114,24 +408,29 @@ def test_drawing_count_retry_requires_distinct_explicit_candidate_ids():
         {'candidate_id':'C7'},{'candidate_id':'C8'}]},choices,require_marker_ids=True)
 
 
-def test_collapsed_xyz_source_points_cannot_reuse_the_same_view_by_uv_or_candidate_id():
+def test_collapsed_xyz_blocks_only_the_ambiguous_view_pixel_and_keeps_other_uvs():
     choices=[
         {'id':1,'view_id':'+Z','uv':[.32,.96],
          'source_point_names':['N2_PNT2','N4_PNT2'],
-         'blocked_view_ids_by_source_name':{'N2_PNT2':['+Z'],'N4_PNT2':['+Z']}},
+         'blocked_uvs_by_source_name':{'N2_PNT2':[{'view_id':'+Z','uv':[.32,.96]}],
+             'N4_PNT2':[{'view_id':'+Z','uv':[.32,.96]}]}},
         {'id':2,'view_id':'-X','uv':[.6,.4],
          'source_point_names':['N2_PNT2','N4_PNT2'],
-         'blocked_view_ids_by_source_name':{'N2_PNT2':['+Z'],'N4_PNT2':['+Z']}},
+         'blocked_uvs_by_source_name':{'N2_PNT2':[{'view_id':'+Z','uv':[.32,.96]}],
+             'N4_PNT2':[{'view_id':'+Z','uv':[.32,.96]}]}},
     ]
     raw_uv=_surface_candidate_selection_audit({'markers':[
         {'source_point_names':['N2_PNT2'],'view_id':'+Z','uv':[.32,.96]}]},choices)
-    assert any(row['reason']=='collapsed_source_point_view_forbidden' for row in raw_uv)
+    assert any(row['reason']=='collapsed_source_point_ray_hit_forbidden' for row in raw_uv)
     candidate_id=_surface_candidate_selection_audit({'markers':[
         {'source_point_names':['N4_PNT2'],'candidate_id':'C1'}]},choices)
-    assert any(row['reason']=='collapsed_source_point_view_forbidden' for row in candidate_id)
+    assert any(row['reason']=='collapsed_source_point_ray_hit_forbidden' for row in candidate_id)
     alternate=_surface_candidate_selection_audit({'markers':[
         {'source_point_names':['N4_PNT2'],'candidate_id':'C2'}]},choices)
     assert not alternate
+    same_view_other_uv=_surface_candidate_selection_audit({'markers':[
+        {'source_point_names':['N2_PNT2'],'view_id':'+Z','uv':[.33,.96]}]},choices)
+    assert not same_view_other_uv
 
 
 def test_cloned_source_scoped_candidate_ids_cannot_hide_duplicate_physical_hits():
@@ -183,7 +482,7 @@ def test_source_xy_layout_evidence_keeps_literal_coordinates_and_pair_distances(
         'pairwise_xy_distances':[{'points':['A01','J01'],'xy_distance_mm':0.0}]}]
 
 
-def test_surface_candidate_geometry_groups_point_scoped_ids_by_physical_hit():
+def test_surface_candidate_geometry_groups_ray_hits_by_physical_hit_and_source_option_set():
     candidates=[
         {'id':1,'view_id':'+Z','uv':[.4,.5],'position':[1.,2.,3.],
          'source_point_names':['J01']},
@@ -200,12 +499,14 @@ def test_surface_candidate_geometry_groups_point_scoped_ids_by_physical_hit():
     assert evidence==[
         {'cad_xyz_mm':[1.,2.,3.],'views':[
             {'view_id':'+Z','uv':[.4,.5],
-             'candidate_ids_by_source_point':{'J01':'C1','A01':'C7'}},
+             'candidate_options':[{'source_point_names':['J01'],'candidate_ids':['C1']},
+                 {'source_point_names':['A01'],'candidate_ids':['C7']}]},
             {'view_id':'-Z','uv':[.6,.5],
-             'candidate_ids_by_source_point':{'J01':'C2','A01':'C8'}}]},
+             'candidate_options':[{'source_point_names':['J01'],'candidate_ids':['C2']},
+                 {'source_point_names':['A01'],'candidate_ids':['C8']}]}]},
         {'cad_xyz_mm':[4.,5.,6.],'views':[
             {'view_id':'+Z','uv':[.8,.2],
-             'candidate_ids_by_source_point':{'J01':'C3'}}]}]
+             'candidate_options':[{'source_point_names':['J01'],'candidate_ids':['C3']}]}]}]
 
 
 def test_later_visual_chunks_cannot_reuse_reserved_cad_hit_positions():
@@ -257,8 +558,8 @@ def test_duplicate_surface_retry_increases_temperature_and_uses_alternative_hits
     assert [row['candidate_id'] for row in parsed['markers']]==['C3','C4']
     assert model.temperatures==[0.0,0.18]
     assert 'pairwise_xy_distances' in model.messages[0]
-    assert 'candidate_ids_by_source_point' in model.messages[0]
-    assert 'equal XYZ rows are the same physical hit' in model.messages[0]
+    assert 'candidate_options' in model.messages[0]
+    assert 'equal XYZ rows across views are the same physical hit' in model.messages[0]
     assert 'Use the per-point alternative' in model.messages[1]
     assert 'common in-plane rigid transform' in model.messages[1]
     assert attempts[0]['contract_issues'][0]['members'][0]['alternative_candidates'][0]['candidate_id']=='C3'
@@ -286,14 +587,18 @@ def test_geometry_recovery_requires_unique_candidate_ids_only_for_points_with_ca
     assert any(row.get('reason')=='candidate_id_reused_for_distinct_markers' for row in reused)
 
 
-def test_collapsed_group_diagnostic_keeps_all_overlapping_names_when_ray_misses_another_point():
-    blocked=local_matching._blocked_views_from_geometry_diagnostic({
-        'reason':'distinct_source_points_collapsed_to_same_view_uv','view_id':'+Z',
+def test_collapsed_group_diagnostic_blocks_only_exact_uv_for_all_overlapping_names():
+    blocked=local_matching._blocked_uvs_from_geometry_diagnostic({
+        'reason':'distinct_source_points_collapsed_to_same_view_uv','view_id':'+Z','uv':[.2,.7],
         'source_point_names':['IN_PNT_Q18','IN_PNT_Q28'],
-        'missed_marker_points':[{'source_point_names':['IN_PNT_Q45'],'view_id':'+Z'}]})
-    assert blocked=={'IN_PNT_Q18':{'+Z'},'IN_PNT_Q28':{'+Z'},'IN_PNT_Q45':{'+Z'}}
-    assert local_matching._blocked_views_from_geometry_diagnostic(
+        'missed_marker_points':[{'source_point_names':['IN_PNT_Q45'],'view_id':'+Z','uv':[.2,.7]}]})
+    assert blocked=={name:[{'view_id':'+Z','uv':[.2,.7]}]
+        for name in ('IN_PNT_Q18','IN_PNT_Q28','IN_PNT_Q45')}
+    assert local_matching._blocked_uvs_from_geometry_diagnostic(
         {'reason':'marker_view_ray_missed_CAD','view_id':'+Z','source_point_names':['P1']})=={}
+    assert local_matching._blocked_uvs_from_geometry_diagnostic(
+        {'reason':'distinct_source_points_collapsed_to_same_view_uv','view_id':'+Z',
+         'source_point_names':['P1']})=={}
 
 
 def test_even_spacing_search_gate_rejects_clusters_without_assuming_a_straight_line():
@@ -682,6 +987,26 @@ def test_small_visual_chunk_requires_candidate_id_when_an_exact_hit_option_exist
         fai=23,surface_candidates=candidates,require_candidate_ids={'CIR_N1_VISION'})==[]
 
 
+def test_invalid_candidate_ids_with_collapsed_uv_return_audit_instead_of_crashing():
+    candidates=[
+        {'id':1,'view_id':'+Z','uv':[.2,.3],'position':[0.,0.,0.],
+         'source_point_names':['P1']},
+        {'id':2,'view_id':'+Z','uv':[.2,.3],'position':[1.,0.,0.],
+         'source_point_names':['P2']},
+        {'id':3,'view_id':'-X','uv':[.7,.4],'position':[0.,1.,0.],
+         'source_point_names':['P1']},
+        {'id':4,'view_id':'-X','uv':[.8,.4],'position':[1.,1.,0.],
+         'source_point_names':['P2']},
+    ]
+    parsed={'markers':[
+        {'source_point_names':['P1'],'candidate_id':'C999','view_id':'+Z','uv':[.5,.5]},
+        {'source_point_names':['P2'],'candidate_id':'C998','view_id':'+Z','uv':[.5,.5]},
+    ]}
+    issues=local_matching._surface_candidate_selection_audit(parsed,candidates)
+    assert any(row.get('reason')=='explicit_valid_candidate_id_required' for row in issues)
+    assert any(row.get('reason')=='duplicate_physical_surface_for_distinct_markers' for row in issues)
+
+
 def test_chunked_visual_outputs_merge_only_complete_disjoint_model_decisions():
     chunks=[['P1','P2'],['P3']]
     results=[
@@ -705,6 +1030,15 @@ def test_chunked_visual_outputs_merge_only_complete_disjoint_model_decisions():
     assert merged['_chunk_failures']==[]
     assert merged['coordinate_choices'][0]['name']=='P3'
     assert merged['registration_points'][0]['source_point_name']=='P3'
+
+
+def test_complete_xyz_marker_groups_can_be_partitioned_into_short_model_responses():
+    points=[{'name':f'P{index:02d}','xyz':[float(index),0.,0.]} for index in range(1,36)]
+    chunks=local_matching._partition_visual_source_points(points,chunk_size=6,threshold=0)
+    assert len(chunks)==6
+    assert max(map(len,chunks))==6
+    assert [point['name'] for chunk in chunks for point in chunk]==[
+        point['name'] for point in points]
 
 
 def test_chunked_visual_merge_abstains_if_any_point_is_repeated_or_missing():

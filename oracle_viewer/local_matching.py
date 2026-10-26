@@ -33,6 +33,9 @@ from .msop_tables import feature_coordinate_rows
 
 VIEWER_LOCATION_TASK=(
     '当前任务是识别并标注 FAI 在产品上的实体作用位置，不是判断 AOI 是否能执行该测量。'
+    '对于平面度、直线度、轮廓度、位置度等几何测量，MSOP 明示的每个测量向量点都必须映射到 CAD 上对应的被测实体表面；'
+    '这些测点不是焊点、螺母或力学试验对象，不能因其属于 Datum/构造平面或构造线而漏标或拒绝。'
+    '构造平面/线应由原文指定的测点集合建立，不能把构造元素另计成新的测点；原文XYZ、坐标系、实体与整组几何校验仍须一致。'
     '拉力、扭矩、剪切、焊点和破坏性试验也需要在 Viewer 中定位相应螺母、焊片或试验区域。'
     '原文写不能由某测量机测量，并不表示该位置不存在。可使用有明确原文特征关联的完整 XYZ 支撑点组来定位试验对象，'
     '但必须说明这些是位置支撑点，不是该力学试验的几何测量点；不能宣称相机可测力、AOI 可完成该试验或计量已经通过。'
@@ -61,7 +64,8 @@ def _complete_visual_context_budget(messages,*,limit=58000):
 
 
 def _compact_visual_evidence_message(message,*,fai,source_points,source_pages,
-        required_marker_groups=(),surface_candidates=(),mode='markers',failure_summary=None):
+        required_marker_groups=(),surface_candidates=(),mode='markers',failure_summary=None,
+        layout_source_points=None,method_evidence=None,dependency_evidence=None):
     """Shorten redundant instructions while preserving every source attachment.
 
     Large MSOP point tables and source pages stay byte-for-byte intact in the
@@ -79,8 +83,13 @@ def _compact_visual_evidence_message(message,*,fai,source_points,source_pages,
         candidate_names=set(candidate.get('source_point_names') or [])
         if point_name_set and candidate_names and not candidate_names.intersection(point_name_set):
             continue
-        row={key:candidate[key] for key in ('id','view_id','uv','feature','source_point_names',
-            'candidate_role','candidate_roles','blocked_view_ids_by_source_name') if key in candidate}
+        # The compact marker retry carries a shared XYZ/UV/candidate-ID table
+        # below. Repeating every candidate again as a per-point object bloats
+        # large FAI prompts; retain only exact blocked-hit exceptions here.
+        fields=() if mode=='markers' else (
+            'id','view_id','uv','feature','source_point_names','candidate_role','candidate_roles',
+            'blocked_uvs_by_source_name','blocked_view_ids_by_source_name')
+        row={key:candidate[key] for key in fields if key in candidate}
         if row:
             compact_candidates.append(row)
     if mode=='frame_candidate':
@@ -103,10 +112,75 @@ def _compact_visual_evidence_message(message,*,fai,source_points,source_pages,
     if failure_summary:
         content+=' Repair diagnostics: '+json.dumps(failure_summary,ensure_ascii=False,separators=(',',':'))+'.'
     if compact_candidates:
-        content+=' Exact CAD ray-hit candidates and per-source blocked views: '+json.dumps(
+        content+=' Exact CAD ray-hit candidates and per-source blocked ray hits: '+json.dumps(
             compact_candidates,ensure_ascii=False,separators=(',',':'))+'.'
+    if mode=='markers':
+        blocked_by_name={}
+        for candidate in surface_candidates or []:
+            if not isinstance(candidate,dict):continue
+            for name,hits in (candidate.get('blocked_uvs_by_source_name') or {}).items():
+                if point_name_set and name not in point_name_set:continue
+                rows=blocked_by_name.setdefault(name,[]);seen={
+                    (row.get('view_id'),tuple(row.get('uv') or [])) for row in rows}
+                for hit in hits if isinstance(hits,list) else []:
+                    if not isinstance(hit,dict):continue
+                    signature=(hit.get('view_id'),tuple(hit.get('uv') or []))
+                    if signature in seen:continue
+                    seen.add(signature);rows.append(hit)
+            for name,views in (candidate.get('blocked_view_ids_by_source_name') or {}).items():
+                if point_name_set and name not in point_name_set:continue
+                rows=blocked_by_name.setdefault(name,[])
+                known_views={row.get('view_id') for row in rows if isinstance(row,dict)}
+                for view in views if isinstance(views,list) else []:
+                    if view not in known_views:
+                        rows.append({'view_id':view})
+                        known_views.add(view)
+        if blocked_by_name:
+            content+=' Deduplicated blocked exact ray hits by source point: '+json.dumps(
+                blocked_by_name,ensure_ascii=False,separators=(',',':'))+'.'
+    if layout_source_points is not None:
+        # Compact retries must still carry the complete FAI's literal source
+        # coordinates. Keeping the giant extracted-PDF transcript as well as
+        # these rows duplicates the same evidence and can make every retry
+        # exceed Strata's context budget before inference starts.
+        rows=[]
+        for point in layout_source_points:
+            if not isinstance(point,dict) or not point.get('name'):
+                continue
+            row={key:point[key] for key in ('name','xyz','program','coordinate_system') if key in point}
+            # Keep literal 2D coordinates only for points without XYZ. When
+            # XYZ exists, these are often duplicated projection rows; all
+            # relevant source pages and the drawing images remain attached.
+            if point.get('xyz') is None:
+                for key in ('pages','source_coordinates_2d','source_coordinate_variants_2d'):
+                    if key in point:row[key]=point[key]
+            variants=point.get('coordinate_variants') or []
+            primary=(point.get('program'),point.get('coordinate_system'),
+                     tuple(point.get('xyz') or ()) if isinstance(point.get('xyz'),(list,tuple)) else None)
+            distinct=[];seen=set()
+            for variant in variants:
+                if not isinstance(variant,dict):continue
+                compact_variant={key:variant[key] for key in
+                    ('page','program','coordinate_system','xyz') if key in variant}
+                variant_xyz=variant.get('xyz')
+                signature=(variant.get('program',point.get('program')),
+                    variant.get('coordinate_system',point.get('coordinate_system')),
+                    tuple(variant_xyz) if isinstance(variant_xyz,(list,tuple)) else None)
+                if signature==primary or signature in seen:continue
+                seen.add(signature);distinct.append(compact_variant)
+            if distinct:
+                row['coordinate_variants']=distinct
+            rows.append(row)
+        content+=' Complete literal MSOP point rows for this FAI (including coordinate alternatives): '+json.dumps(
+            rows,ensure_ascii=False,separators=(',',':'))+'.'
+    if method_evidence:
+        content+=' Original MSOP method instructions: '+str(method_evidence)[:6000]
+    if dependency_evidence:
+        content+=' Related datum and coordinate-frame instructions: '+str(dependency_evidence)[:6000]
     result={**message,'content':content}
-    result['attachments']=[dict(attachment) for attachment in message.get('attachments',[])]
+    result['attachments']=[{key:value for key,value in attachment.items() if key!='parsed_text'}
+        for attachment in message.get('attachments',[])] if layout_source_points is not None else [
+            dict(attachment) for attachment in message.get('attachments',[])]
     return result
 
 
@@ -228,7 +302,8 @@ def _registration_reference_selection_valid(known_source_points, registration_po
 def _visual_marker_validation_issues(parsed, *, fai, required_marker_count,
                                      known_source_points, rigid_group_possible,
                                      candidate_selection_valid, coordinate_choices_valid,
-                                     truncated,candidate_selection_audit=None):
+                                     truncated,candidate_selection_audit=None,
+                                     coincident_xy_z_pairs=()):
     """Return concrete, machine-checkable reasons a visual decision needs repair."""
     issues=[]
     if truncated: issues.append({'code':'truncated_output'})
@@ -259,6 +334,34 @@ def _visual_marker_validation_issues(parsed, *, fai, required_marker_count,
         if candidate_selection_audit:
             issue['details']=candidate_selection_audit[:20]
         issues.append(issue)
+    # A top/bottom orthographic view removes Z from its image coordinates.
+    # When the MSOP explicitly measures a Z distance between two points at
+    # identical X/Y, either ±Z view necessarily collapses those locations onto
+    # one ray. Require the model to select a side view so the pair remains
+    # separately identifiable; this validator rejects a bad view but never
+    # chooses or relocates either point.
+    if coincident_xy_z_pairs and isinstance(markers,list):
+        marker_by_name={}
+        for marker in markers:
+            if not isinstance(marker,dict):
+                continue
+            names=marker.get('source_point_names')
+            if isinstance(names,list) and len(names)==1 and isinstance(names[0],str):
+                marker_by_name[names[0]]=marker
+        failures=[]
+        for pair in coincident_xy_z_pairs:
+            names=pair.get('source_point_names') if isinstance(pair,dict) else None
+            if not isinstance(names,list) or len(names)!=2:
+                continue
+            left,right=(marker_by_name.get(name) for name in names)
+            if left is None or right is None:
+                continue
+            views=(left.get('view_id'),right.get('view_id'))
+            if any(view not in ('+X','-X','+Y','-Y') for view in views):
+                failures.append({'source_point_names':names,'selected_views':list(views),
+                    'reason':'z_distance_pair_requires_side_view'})
+        if failures:
+            issues.append({'code':'coincident_xy_z_pair_view_collapsed','details':failures[:20]})
     return issues
 
 
@@ -310,23 +413,53 @@ def _collapsed_source_marker_groups(markers,resolved_sources):
     return collapsed
 
 
-def _blocked_views_from_geometry_diagnostic(diagnostic):
-    """Return source-point views that cannot separate a collapsed XYZ group."""
+def _blocked_uvs_from_geometry_diagnostic(diagnostic):
+    """Return only the exact source-point/view/pixel hits proven ambiguous."""
     if not isinstance(diagnostic,dict) or diagnostic.get('reason')!='distinct_source_points_collapsed_to_same_view_uv':
         return {}
     blocked={}
     top_view=diagnostic.get('view_id')
-    for name in diagnostic.get('source_point_names') or []:
-        if isinstance(name,str) and top_view:
-            blocked.setdefault(name,set()).add(top_view)
+    top_uv=diagnostic.get('uv')
+    def add(name,view,uv):
+        if not isinstance(name,str) or not view or not isinstance(uv,(list,tuple)) or len(uv)<2:
+            return
+        try: point=[float(uv[0]),float(uv[1])]
+        except (TypeError,ValueError): return
+        row={'view_id':str(view),'uv':point}
+        values=blocked.setdefault(name,[])
+        if row not in values: values.append(row)
     for row in diagnostic.get('missed_marker_points') or []:
         if not isinstance(row,dict):
             continue
         view=row.get('view_id') or top_view
         for name in row.get('source_point_names') or []:
-            if isinstance(name,str) and view:
-                blocked.setdefault(name,set()).add(view)
+            add(name,view,row.get('uv') or top_uv)
+    for name in diagnostic.get('source_point_names') or []:
+        add(name,top_view,top_uv)
     return blocked
+
+
+def _candidate_hit_is_blocked(candidate,name,blocked_by_name):
+    """A failed pixel must not disable other usable pixels in the same view."""
+    if not isinstance(candidate,dict):return False
+    uv=candidate.get('uv');view=candidate.get('view_id')
+    legacy_views=(candidate.get('blocked_view_ids_by_source_name') or {}).get(name,[])
+    exact_rows=(candidate.get('blocked_uvs_by_source_name') or {}).get(name,[])
+    # Older candidate producers only recorded an entire unusable view. Honor
+    # that contract when no exact-hit evidence is available for this point.
+    if not exact_rows and view in legacy_views:return True
+    if not isinstance(uv,(list,tuple)) or len(uv)<2:return False
+    try: point=np.asarray(uv[:2],dtype=float)
+    except (TypeError,ValueError):return False
+    for blocked in blocked_by_name.get(name,[]) if isinstance(blocked_by_name,dict) else []:
+        if not isinstance(blocked,dict) or blocked.get('view_id')!=view:continue
+        blocked_uv=blocked.get('uv')
+        if blocked_uv is None:return True
+        if not isinstance(blocked_uv,(list,tuple)) or len(blocked_uv)<2:continue
+        try: other=np.asarray(blocked_uv[:2],dtype=float)
+        except (TypeError,ValueError):continue
+        if np.linalg.norm(point-other)<=1e-5:return True
+    return False
 
 
 def _source_visual_search_candidates(mesh,source_names,*,allowed_face_ids=None,
@@ -357,17 +490,16 @@ def _source_visual_search_candidates(mesh,source_names,*,allowed_face_ids=None,
             max_candidates_per_view=max_candidates_per_view,
             allowed_face_ids=set(face_key) if face_key is not None else None)
         for row in candidates:
-            for name in scoped_names:
-                # Keep candidate IDs source-specific. The exact same physical
-                # hit may be a tempting but invalid answer for several measured
-                # points; point-scoped IDs let validation reject cross-point reuse.
-                choice=dict(row)
-                choice['id']=len(output)+1
-                choice['source_point_names']=[name]
-                choice['candidate_role']='global_surface_search'
-                choice['candidate_roles']=['global_surface_search','measurement_marker']
-                choice['feature']='proactive CAD ray-hit search option'
-                output.append(choice)
+            # One ID denotes one exact CAD ray hit. Several source points may
+            # consider it as an alternative, but the local model can assign
+            # that physical hit to at most one point in its joint decision.
+            choice=dict(row)
+            choice['id']=len(output)+1
+            choice['source_point_names']=list(scoped_names)
+            choice['candidate_role']='global_surface_search'
+            choice['candidate_roles']=['global_surface_search','measurement_marker']
+            choice['feature']='proactive CAD ray-hit search option'
+            output.append(choice)
     return output
 
 
@@ -383,6 +515,24 @@ def _restrict_surface_candidates_to_source_hosts(candidates,source_names,host_fa
             choice['candidate_role']='global_surface_search'
             choice['candidate_roles']=['global_surface_search','measurement_marker']
             output.append(choice)
+    return output
+
+
+def _scope_global_surface_candidates(candidates,source_names,*,first_id):
+    """Assign one stable ID per global CAD ray hit and list eligible points.
+
+    Each hit is an alternative available to the listed source points. The
+    model makes a joint one-to-one assignment; IDs are never cloned per point,
+    so prompts stay bounded and reusing a physical hit is machine-detectable.
+    """
+    names=list(dict.fromkeys(name for name in source_names
+        if isinstance(name,str) and name))
+    output=[]
+    for candidate in candidates or []:
+        row=dict(candidate)
+        row['id']=first_id+len(output)
+        row['source_point_names']=names
+        output.append(row)
     return output
 
 
@@ -614,19 +764,16 @@ def _surface_candidate_selection_audit(parsed, surface_candidates,*,require_mark
                 allowed=sorted(candidate_sources.get(name,set()),key=lambda value:(not value.isdigit(),int(value) if value.isdigit() else value))
                 selected_candidate=candidates_by_id.get(key) if key else None
                 selected_view=(selected_candidate or {}).get('view_id') if candidate_id is not None else row.get('view_id')
-                blocked_views={view for candidate in surface_candidates
-                    for view in candidate.get('blocked_view_ids_by_source_name',{}).get(name,[])}
-                # If two different measured XYZ points collapsed to one
-                # orthographic pixel, that view cannot distinguish their
-                # depth positions. Keep the alternate-view constraint hard
-                # even when the vision model returns raw UV instead of a
-                # candidate ID.
-                if selected_view in blocked_views:
+                blocked_uvs={source_name:hits for candidate in surface_candidates
+                    for source_name,hits in candidate.get('blocked_uvs_by_source_name',{}).items()}
+                selected_hit=(selected_candidate if candidate_id is not None else row) or {}
+                # A collision proves this exact ray hit is ambiguous. Other
+                # UVs in the same orthographic image remain eligible.
+                if _candidate_hit_is_blocked(selected_hit,name,blocked_uvs):
                     issues.append({'field':field,'source_point_name':name,
-                        'selected_view_id':selected_view,
-                        'reason':'collapsed_source_point_view_forbidden',
-                        'required_alternate_views':sorted(
-                            {'+X','-X','+Y','-Y','+Z','-Z'}-blocked_views)})
+                        'selected_view_id':selected_view,'selected_uv':selected_hit.get('uv'),
+                        'reason':'collapsed_source_point_ray_hit_forbidden',
+                        'allowed_same_view':True})
                     if len(issues)>=40:
                         return issues
                 # Candidate atlases are optional search hints. A model may
@@ -726,9 +873,15 @@ def _surface_candidate_selection_audit(parsed, surface_candidates,*,require_mark
                     chosen_positions=[np.asarray(row['cad_xyz_mm'],dtype=float) for row in alternatives]
                     scores=[min(float(np.linalg.norm(np.asarray(row['cad_xyz_mm'])-old))
                                 for old in chosen_positions) for row in alternative_rows]
-                else:
+                elif positions:
+                    # Exact candidate positions may be unavailable when the
+                    # model supplied invalid IDs and only repeated UVs remain.
+                    # Keep the audit diagnostic, but do not let its repair
+                    # suggestions crash before the normal contract rejects it.
                     scores=[float(np.linalg.norm(np.asarray(row['cad_xyz_mm'])-positions[0]))
                             for row in alternative_rows]
+                else:
+                    scores=[0.0 for _row in alternative_rows]
                 selected_index=int(np.argmax(scores))
                 alternatives.append(alternative_rows.pop(selected_index))
             members.append({'source_point_name':name,'candidate_id':candidate_id,
@@ -2453,14 +2606,34 @@ def _surface_candidate_geometry_evidence(surface_candidates,expected_names):
         group=positions.setdefault(key,{'cad_xyz_mm':list(key),'views':{}})
         view=group['views'].setdefault((view_id,tuple(uv) if isinstance(uv,(list,tuple)) else ()),
             {'view_id':view_id,'uv':list(uv) if isinstance(uv,(list,tuple)) else None,
-             'candidate_ids_by_source_point':{}})
+             '_candidate_ids_by_source_point':{}})
         for name in names:
-            view['candidate_ids_by_source_point'][name]='C'+str(candidate_id).removeprefix('C')
+            view['_candidate_ids_by_source_point'].setdefault(name,set()).add(
+                'C'+str(candidate_id).removeprefix('C'))
     result=[]
     for key,group in sorted(positions.items()):
-        views=sorted(group['views'].values(),key=lambda row:(row['view_id'],row.get('uv') or []))
+        views=[]
+        for raw_view in group['views'].values():
+            candidate_sets={}
+            for name,ids in raw_view['_candidate_ids_by_source_point'].items():
+                candidate_sets.setdefault(tuple(sorted(ids)),[]).append(name)
+            view={'view_id':raw_view['view_id'],'uv':raw_view.get('uv'),
+                'candidate_options':[{'source_point_names':sorted(names),
+                    'candidate_ids':list(ids)} for ids,names in sorted(candidate_sets.items())]}
+            views.append(view)
+        views.sort(key=lambda row:(row['view_id'],row.get('uv') or []))
         result.append({'cad_xyz_mm':group['cad_xyz_mm'],'views':views})
     return result
+
+
+def _group_source_candidate_options(options):
+    """Encode shared ray-hit alternatives once for all equally eligible points."""
+    grouped={}
+    for name,ids in options.items():
+        key=tuple(ids)
+        if key:grouped.setdefault(key,[]).append(name)
+    return [{'source_point_names':names,'candidate_ids':list(ids)}
+        for ids,names in sorted(grouped.items())]
 
 
 def _selected_surface_candidate_positions(parsed,surface_candidates):
@@ -2667,6 +2840,65 @@ def _merge_visual_marker_chunks(chunk_results, expected_chunks, *, fai):
     return merged
 
 
+def _merge_visual_chunk_point_repair(previous, repaired, repair_names):
+    """Replace only locally model-selected markers implicated by a FAI failure.
+
+    If one marker represents several source names, the repair set expands to
+    that entire marker. All other markers stay byte-for-byte as previously
+    selected by the local model; final whole-FAI geometry and entity gates are
+    still rerun after chunk merge.
+    """
+    if not isinstance(previous,dict) or not isinstance(repaired,dict):
+        return None,{'reason':'chunk_repair_requires_two_model_decisions'}
+    old=previous.get('markers');new=repaired.get('markers')
+    if not isinstance(old,list) or not isinstance(new,list):
+        return None,{'reason':'chunk_repair_markers_missing'}
+    selected={name for name in repair_names if isinstance(name,str)}
+    changed=True
+    while changed:
+        changed=False
+        for marker in old:
+            names=marker.get('source_point_names') if isinstance(marker,dict) else None
+            if isinstance(names,list) and selected.intersection(names):
+                before=len(selected);selected.update(name for name in names if isinstance(name,str))
+                changed=changed or len(selected)!=before
+    if not selected:
+        return None,{'reason':'chunk_repair_has_no_source_names'}
+    retained=[]
+    for marker in old:
+        names=marker.get('source_point_names') if isinstance(marker,dict) else None
+        if not isinstance(names,list):
+            return None,{'reason':'cached_chunk_marker_names_invalid'}
+        if not selected.intersection(names):
+            retained.append(marker)
+    observed=[]
+    for marker in new:
+        names=marker.get('source_point_names') if isinstance(marker,dict) else None
+        if not isinstance(names,list) or not names or any(name not in selected for name in names):
+            return None,{'reason':'repaired_chunk_contains_unrequested_source_name'}
+        observed.extend(names)
+    if set(observed)!=selected or len(observed)!=len(selected):
+        return None,{'reason':'repaired_chunk_source_coverage_incomplete',
+            'expected_source_point_names':sorted(selected),
+            'observed_source_point_names':observed}
+    result={**previous,**repaired,'markers':retained+new}
+    result['registration_points']=[row for row in (previous.get('registration_points') or [])
+        if isinstance(row,dict) and (row.get('source_point_name') or row.get('name')) not in selected]
+    result['registration_points']+=list(repaired.get('registration_points') or [])
+    result['coordinate_choices']=[row for row in (previous.get('coordinate_choices') or [])
+        if isinstance(row,dict) and row.get('name') not in selected]
+    result['coordinate_choices']+=list(repaired.get('coordinate_choices') or [])
+    result['source_pages']=list(dict.fromkeys([*(previous.get('source_pages') or []),
+        *(repaired.get('source_pages') or [])]))
+    confidence_rank={'low':0,'medium':1,'high':2}
+    prior_confidence=_confidence(previous.get('confidence'))
+    repaired_confidence=_confidence(repaired.get('confidence'))
+    if prior_confidence and repaired_confidence:
+        result['confidence']=min((prior_confidence,repaired_confidence),
+            key=lambda value:confidence_rank[value])
+    return result,None
+
+
 
 def _visual_chunk_contract_issues(parsed,expected_names,*,fai,surface_candidates=(),
                                  require_candidate_ids=()):
@@ -2693,6 +2925,127 @@ def _visual_chunk_contract_issues(parsed,expected_names,*,fai,surface_candidates
     return issues
 
 
+def _visual_chunk_source_coverage_valid(parsed,expected_names,*,fai):
+    """Check only subset identity/count so imperfect chunks can be repaired locally.
+
+    Candidate ID, host, ray, rigid-fit and entity requirements remain in the
+    normal whole-FAI gates. Keeping structurally complete local-model output
+    lets a later targeted repair preserve unaffected decisions from that pass.
+    """
+    if (not isinstance(parsed,dict) or parsed.get('decision') not in ('AUTO_MARK','AUTOMARK')
+            or _fai_number(parsed.get('fai'))!=fai or not isinstance(parsed.get('markers'),list)
+            or not parsed['markers']):
+        return False
+    names=[]
+    for marker in parsed['markers']:
+        values=marker.get('source_point_names') if isinstance(marker,dict) else None
+        if not isinstance(values,list) or not values or any(not isinstance(name,str) for name in values):
+            return False
+        names.extend(values)
+    expected=list(expected_names)
+    return set(names)==set(expected) and len(names)==len(expected) and len(set(expected))==len(expected)
+
+
+def _normalize_positive_visual_chunk_decision(parsed,expected_names):
+    """Normalize clear affirmative local-model labels only for complete subsets.
+
+    Strata sometimes emits ``success`` or ``pass`` for an otherwise complete
+    marker object. Keep rejection/abstention semantics intact, and never turn
+    an incomplete or explicitly rejected set into an automatic mark. The
+    subsequent CAD, point-coverage, rigid-fit, and ray-hit gates remain the
+    authority for accepting the geometry.
+    """
+    if not isinstance(parsed,dict):return parsed
+    decision=str(parsed.get('decision') or '').strip().casefold()
+    if decision not in {'success','succeeded','pass','accept','accepted','approve','approved',
+                        'proceed','placed','placement','mark','auto mark','auto_mark'}:
+        return parsed
+    markers=parsed.get('markers')
+    if not isinstance(markers,list) or not markers:return parsed
+    names=[]
+    for marker in markers:
+        if not isinstance(marker,dict) or str(marker.get('status') or '').casefold() in {
+                'reject','rejected','abstain','invalid'}:
+            return parsed
+        source_names=marker.get('source_point_names')
+        if not isinstance(source_names,list):
+            point_name=(marker.get('point_name') or marker.get('source_point_name') or
+                        marker.get('source_point') or marker.get('name'))
+            source_names=[point_name] if isinstance(point_name,str) else []
+            if source_names:marker['source_point_names']=source_names
+        if marker.get('candidate_id') is None and marker.get('cad_id') is not None:
+            marker['candidate_id']=marker['cad_id']
+        if marker.get('source_pages') is None:
+            page=marker.get('source_page',marker.get('page'))
+            if page is not None:marker['source_pages']=page if isinstance(page,list) else [page]
+        names.extend(name for name in source_names if isinstance(name,str))
+    if set(names)==set(expected_names) and len(names)==len(expected_names):
+        parsed['decision']='AUTO_MARK'
+        # Confidence is metadata, not geometry evidence. If the model emits a
+        # complete positive subset but omits this required field, retain the
+        # subset for the strict CAD/registration gates and label it low rather
+        # than discarding otherwise usable point decisions or overstating
+        # certainty.
+        if _confidence(parsed.get('confidence')) is None:
+            parsed['confidence']='low'
+        # Complete marker correspondence is sufficient for the subsequent
+        # whole-group rigid fit. Some model responses redundantly emit a list
+        # of registration point names (or coordinates) outside the chunk
+        # schema; discard that optional duplicate payload so it cannot create
+        # cross-chunk reference conflicts or inflate later retries.
+        parsed['registration_points']=[]
+        # Drop verbose duplicate coordinate/entity fields after canonicalizing
+        # the model's aliases. The service resolves geometry from candidate_id
+        # and view+UV, then independently enforces source-page and CAD gates.
+        allowed={'source_point_names','candidate_id','view_id','uv','feature','source_pages'}
+        for marker in markers:
+            if isinstance(marker,dict):
+                for key in list(marker):
+                    if key not in allowed:marker.pop(key,None)
+    return parsed
+
+
+def _compact_visual_failure_feedback(rows,*,limit=12,max_chars=6000):
+    """Keep actionable whole-group geometry failures for the next model pass."""
+    allowed={'code','reason','decision','expected','actual','missing_count','missing_names',
+        'source_point_name','source_point_names','name','scope','program','coordinate_system',
+        'selected_views',
+        'view_id','uv','candidate_id','residual_mm','rms_residual_mm','max_residual_mm',
+        'held_out_max_mm','cad_xyz_mm','source_xyz_mm','reference_count','required_count',
+        'available_count','threshold_mm','gate_mm','displacement_mm','projected_error_mm',
+        'surface_distance_mm','shape_error_mm','anchor_count','marker_count','registration_point_count',
+        'missed_registration_points','missed_marker_points','required_scopes',
+        'fit_required_point_counts','detail','message'}
+    result=[]
+    def compact(value,depth=0):
+        if depth>5:return None
+        if isinstance(value,dict):
+            out={key:compact(child,depth+1) for key,child in value.items()
+                if key in allowed or key=='details'}
+            return {key:child for key,child in out.items() if child is not None}
+        if isinstance(value,list):return [compact(child,depth+1) for child in value[:8]]
+        if isinstance(value,str):return value[:160]
+        if isinstance(value,(int,float,bool)) or value is None:return value
+        return str(value)[:120]
+    for row in rows if isinstance(rows,list) else []:
+        item=compact(row)
+        if item:
+            encoded=json.dumps([*result,item],ensure_ascii=False,separators=(',',':'))
+            if len(encoded)>max_chars and isinstance(item,dict) and 'details' in item:
+                # Keep the diagnostic code and a few representative point
+                # residuals; the complete validator report remains in the
+                # run receipt. Repeating dozens of failures in every chunk
+                # prompt both wastes context and can prevent inference.
+                details=item.get('details')
+                if isinstance(details,list):
+                    item['details']=details[:2]
+                encoded=json.dumps([*result,item],ensure_ascii=False,separators=(',',':'))
+            if len(encoded)<=max_chars:
+                result.append(item)
+        if len(result)>=limit:break
+    return result
+
+
 def _diagnostic_source_point_names(rows,known_names):
     """Extract only exact MSOP point names from nested validation diagnostics."""
     known=set(known_names);found=set()
@@ -2711,6 +3064,7 @@ def _diagnostic_source_point_names(rows,known_names):
 
 def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_points,
                                  allowed_source_pages,surface_candidates=(),global_source_points=None,
+                                 method_evidence=None,dependency_evidence=None,retry_feedback=None,
                                  temperature=0.,max_repairs=2):
     """Ask the native model to repair only a malformed subset response.
 
@@ -2718,28 +3072,55 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
     regenerated here, and full FAI geometry gates remain mandatory after merge.
     """
     options={name:['C'+str(candidate['id']).removeprefix('C') for candidate in surface_candidates
-        if candidate.get('id') is not None and candidate.get('view_id') not in
-            set(candidate.get('blocked_view_ids_by_source_name',{}).get(name,[])) and
+        if candidate.get('id') is not None and
+        not _candidate_hit_is_blocked(candidate,name,candidate.get('blocked_uvs_by_source_name',{})) and
         name in (candidate.get('source_point_names') or [])]
         for name in expected_names}
-    blocked={name:sorted({view for candidate in surface_candidates
-        for view in candidate.get('blocked_view_ids_by_source_name',{}).get(name,[])})
-        for name in expected_names}
-    blocked={name:views for name,views in blocked.items() if views}
+    # A point-specific CAD candidate atlas is rendered below whenever this
+    # list is non-empty. Make that visual contract explicit: if the model has
+    # at least one eligible numbered hit for a point, a free-form UV is not a
+    # substitute for choosing one of those exact hits. This prevents a
+    # complete-looking grid of invented UVs from passing the subset stage and
+    # consuming the remaining whole-FAI repair attempts.
+    required_candidate_names={name for name,ids in options.items() if ids}
+    blocked={name:[] for name in expected_names}
+    blocked_seen={name:set() for name in expected_names}
+    for candidate in surface_candidates:
+        for name in expected_names:
+            for hit in candidate.get('blocked_uvs_by_source_name',{}).get(name,[]):
+                if not isinstance(hit,dict):continue
+                signature=(hit.get('view_id'),tuple(hit.get('uv') or []))
+                if signature in blocked_seen[name]:continue
+                blocked_seen[name].add(signature);blocked[name].append(hit)
+            for view in candidate.get('blocked_view_ids_by_source_name',{}).get(name,[]):
+                signature=(view,None)
+                if signature in blocked_seen[name]:continue
+                blocked_seen[name].add(signature);blocked[name].append({'view_id':view})
+    blocked={name:hits for name,hits in blocked.items() if hits}
     layout_points=global_source_points or source_points
     layout_names=[point.get('name') for point in layout_points
         if isinstance(point,dict) and isinstance(point.get('name'),str)]
     source_xy_layout=_source_xy_layout_evidence(
         layout_points,layout_names if global_source_points is not None else expected_names)
-    candidate_geometry=_surface_candidate_geometry_evidence(surface_candidates,
-        layout_names if source_xy_layout and global_source_points is not None else expected_names)
+    # Candidate IDs are chunk-scoped. The complete MSOP layout remains in
+    # source_xy_layout, while exact CAD hit geometry for unrelated chunks is
+    # omitted so retries stay inside the local-model context budget.
+    candidate_geometry=_surface_candidate_geometry_evidence(surface_candidates,expected_names)
+    grouped_options=_group_source_candidate_options(options)
     contract=('\nCurrent subset output contract: markers must cover ONLY '+json.dumps(expected_names)+
         ', each name exactly once. Do not add a point from another subset to close a loop or build a plane. '+
         'Full-group totals in the source apply after the service merges all subsets. '+
+        'Return decision exactly AUTO_MARK (or ABSTAIN), not success/pass/reject. Return one compact JSON object. '+
+        'Include confidence as low, medium, or high; use low when uncertain. '+
+        'Each marker may contain only source_point_names, candidate_id, view_id, uv, feature, source_pages. '+
+        'Set registration_points to []; do not repeat XYZ tables or add explanations. Evidence is one short sentence. '+
         'Return the complete corrected subset yourself; the service will not trim your response. '+
-        'Per-point CAD candidate IDs (search hints, not proof of entity identity): '+json.dumps(options)+'. '+
-        ('For these source points the prior view collapsed distinct XYZ depths and is forbidden; choose a different view: '+
-         json.dumps(blocked)+'. The service will reject the forbidden view even if you return raw UV. '
+        'CAD candidate IDs denote exact physical ray hits. The listed source_point_names may each consider those IDs as alternatives; '
+        'assign a different candidate ID to each distinct source point, and never reuse an ID or CAD XYZ for two measured locations. '
+        'Candidate eligibility map (search hints, not proof of entity identity): '+
+        json.dumps(grouped_options,ensure_ascii=False,separators=(',',':'))+'. '+
+        ('These exact prior ray hits collapsed distinct XYZ depths and are forbidden; another UV in the same view remains allowed: '+
+         json.dumps(blocked)+'. The service will reject only the listed view+UV hit. '
          if blocked else '')+
         ('Literal MSOP XY layout evidence (mm; same source page/system only): '+
          json.dumps(source_xy_layout,ensure_ascii=False,separators=(',',':'))+'. Treat this as a joint pattern: '
@@ -2748,12 +3129,18 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
          'point independently to a convenient central hit. For documented equal-XY Z-distance pairs, keep the '
          'two selected hits aligned in-plane but on distinct supported CAD surfaces. These XY rows do not provide Z. '
          if source_xy_layout else '')+
-        ('Exact CAD candidate geometry (ray-hit positions in CAD mm; IDs are scoped to the source point, and '
-         'equal XYZ rows are the same physical hit regardless of view): '+
+        ('Exact CAD candidate geometry (ray-hit positions in CAD mm; each ID is one exact view+UV ray hit; '
+         'equal XYZ rows across views are the same physical hit): '+
          json.dumps(candidate_geometry,ensure_ascii=False,separators=(',',':'))+'. Select a one-to-one mapping '
          'from this table that best matches the source drawing and the complete MSOP point layout. Candidate geometry '
          'is search evidence; the full geometry and measurement gates still decide acceptance. '
          if candidate_geometry else ''))
+    if retry_feedback:
+        contract+=('\nWhole-group geometry rejection from the previous local-model pass: '+
+            json.dumps(retry_feedback,ensure_ascii=False,separators=(',',':'))+'. '
+            'Correct the source-point to CAD candidate assignments that caused these failures. '
+            'Keep the exact source point names and emit only this chunk; do not repeat a failed correspondence. '
+            'These diagnostics are repair targets, not permission to override the complete geometry gates.')
     base={**message,'content':message['content']+contract}
     # Candidate selection is a compact structured decision. Bound generation
     # by subset size so verbose reasoning cannot consume the full 4096-token
@@ -2776,15 +3163,16 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
                     source_points=[point for point in source_points
                         if point.get('name') in expected_names],source_pages=allowed_source_pages,
                     surface_candidates=surface_candidates,mode='markers',
-                    failure_summary=last_issues)
+                    failure_summary=_compact_visual_failure_feedback(
+                        [*(retry_feedback or []),*last_issues],max_chars=3000),
+                    layout_source_points=global_source_points or source_points,
+                    method_evidence=method_evidence,dependency_evidence=dependency_evidence)
                 compact['content']+=('\nThis is chunk '+json.dumps(expected_names,ensure_ascii=False)+
                     ' only; emit each listed source point once and no other point. '
-                    'Per-point eligible CAD candidate IDs: '+json.dumps(options,ensure_ascii=False,
-                        separators=(',',':'))+'.'+
-                    ((' Use this literal MSOP XY point pattern jointly, preserving its pairwise layout under one '
-                      'common in-plane rigid transform and keeping documented equal-XY Z pairs on distinct supported '
-                      'surfaces: '+json.dumps(source_xy_layout,ensure_ascii=False,separators=(',',':'))+'. XY does '
-                      'not supply Z.') if source_xy_layout else ''))
+                    'Use only the eligible candidate IDs listed in the shared CAD hit table below.'+
+                    (' Use the complete literal point-coordinate rows above as one joint layout; preserve their '
+                     'pairwise relationships under one common in-plane rigid transform. Keep documented equal-XY '
+                     'Z-distance pairs aligned in-plane but on distinct supported surfaces. XY alone does not supply Z.'))
                 if candidate_geometry:
                     compact['content']+=(
                         ' Exact shared CAD hit table with per-point IDs and XYZ mm: '+json.dumps(
@@ -2804,9 +3192,9 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
         total_tokens+=tokens
         parsed=_object(raw) or {}
         parsed,aliases=_normalize_model_source_aliases(parsed,source_points,allowed_source_pages)
-        required_ids={name for name,values in options.items() if values}
+        parsed=_normalize_positive_visual_chunk_decision(parsed,expected_names)
         issues=_visual_chunk_contract_issues(parsed,expected_names,fai=fai,
-            surface_candidates=surface_candidates,require_candidate_ids=required_ids)
+            surface_candidates=surface_candidates,require_candidate_ids=required_candidate_names)
         last_issues=issues
         attempts.append({'raw_output':raw,'truncated':bool(truncated),'generated_tokens':tokens,
             'temperature':repair_temperature,
@@ -2819,6 +3207,8 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
             '\nYour last subset response failed the output contract. This is a naming/count/candidate check, '
             'not a geometry authorization. Re-read the same original evidence and return the entire corrected '
             'subset with the exact required names. Never invent coordinates or accept a wrong entity. '
+            'The decision field must be exactly AUTO_MARK or ABSTAIN. Output only the required compact JSON; '
+            'omit XYZ tables, registration references, rationales per point, and any extra fields. '
             +('Different source points landed on the same CAD world position; choose candidates with distinct '
               'verified CAD hit positions, not merely different point-scoped IDs. Use the per-point alternative '
               'IDs, orthographic views, and CAD XYZ coordinates shown in the diagnostics; keep each MSOP source '
@@ -3796,11 +4186,22 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
         # Keep explicit same-XY Z-distance pairs atomic, while including three
         # distinct plan locations per decision so the local model can use the
         # measurement pattern instead of guessing an isolated opposite-face pair.
-        chunk_size=6 if (coincident_xy_z_pairs or candidate_required_source_names) else 10,
+        # Full XYZ groups must be selected against numbered CAD hit options,
+        # and the point-candidate atlas allocates one image per requested
+        # source point. Keeping these decisions to six names leaves room for
+        # the MSOP page, drawing, and complete-group layout evidence while
+        # reducing long structured responses that Strata can truncate or
+        # partially reassign. The full point group and XY layout still remain
+        # in every chunk's source evidence and the final rigid-fit gate.
+        chunk_size=6 if (rigid_group_possible or coincident_xy_z_pairs
+                         or candidate_required_source_names) else 10,
         threshold=0)
         if required_marker_count==len(known_source_points) else [])
     visual_chunk_audit=[]
     visual_chunk_cache={}
+    visual_chunk_repair_names=set()
+    visual_chunk_audit_path=store._dir(project['id'])/'automatic-learning'/(
+        f"fai-chunk-decisions-{mesh['source_sha256'][:16]}-{item['number']}.json")
     for attempt in range(max_visual_attempts):
         if visual_point_chunks:
             # Large MSOP point sets are difficult for the vision model to emit
@@ -3814,24 +4215,52 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
             reserved_surface_positions=[]
             for chunk_index,chunk in enumerate(visual_point_chunks):
                 chunk_names=[point['name'] for point in chunk]
-                chunk_surface_candidates=_exclude_reserved_surface_positions(
-                    surface_candidates,reserved_surface_positions)
+                cached=visual_chunk_cache.get(chunk_index)
+                repair_names=visual_chunk_repair_names.intersection(chunk_names)
+                retained_markers=[]
                 if chunk_index in visual_chunk_cache:
-                    cached=visual_chunk_cache[chunk_index]
-                    cached_positions=_selected_surface_candidate_positions(cached,surface_candidates)
+                    conflict_markers=[marker for marker in cached.get('markers') or []
+                        if not (repair_names.intersection(marker.get('source_point_names') or [])
+                            if isinstance(marker,dict) else False)]
+                    cached_positions=_selected_surface_candidate_positions(
+                        {**cached,'markers':conflict_markers},surface_candidates)
                     conflicts=any(float(np.linalg.norm(position-reserved))<1e-5
                         for position in cached_positions for reserved in reserved_surface_positions)
-                    if not conflicts:
+                    if not conflicts and not repair_names:
                         chunk_results.append(cached)
                         reserved_surface_positions.extend(cached_positions)
                         chunk_trace.append({'chunk':chunk_index+1,'source_point_names':chunk_names,
                             'reused_validated_chunk':True,'parsed_output':cached})
                         continue
-                    # A chunk can be individually valid yet collide with an
-                    # earlier chunk's exact CAD hit. Reopen only this chunk
-                    # with those physical hits removed from its candidate set.
-                    visual_chunk_cache.pop(chunk_index,None)
-                chunk_ambiguous=(sorted(ambiguous_names.intersection(chunk_names))
+                    if conflicts:
+                        # A chunk can be individually valid yet collide with an
+                        # earlier chunk's exact CAD hit. Reopen only this chunk
+                        # with those physical hits removed from its candidate set.
+                        visual_chunk_cache.pop(chunk_index,None)
+                        cached=None;repair_names=set()
+                    elif repair_names:
+                        # Keep unaffected local-model decisions and re-ask only
+                        # the failed point subset. If a previous marker grouped
+                        # multiple source names, repair the whole marker group.
+                        expanded=set(repair_names);changed=True
+                        while changed:
+                            changed=False
+                            for marker in cached.get('markers') or []:
+                                names=marker.get('source_point_names') if isinstance(marker,dict) else None
+                                if isinstance(names,list) and expanded.intersection(names):
+                                    before=len(expanded);expanded.update(name for name in names if name in chunk_names)
+                                    changed=changed or len(expanded)!=before
+                        repair_names=expanded
+                        retained_markers=[marker for marker in cached.get('markers') or []
+                            if not repair_names.intersection(marker.get('source_point_names') or [])]
+                        retained_chunk={'markers':retained_markers}
+                        reserved_surface_positions.extend(
+                            _selected_surface_candidate_positions(retained_chunk,surface_candidates))
+                request_names=([name for name in chunk_names if name in repair_names]
+                    if cached is not None and repair_names else chunk_names)
+                chunk_surface_candidates=_exclude_reserved_surface_positions(
+                    surface_candidates,reserved_surface_positions)
+                chunk_ambiguous=(sorted(ambiguous_names.intersection(request_names))
                                  if not preselected_coordinate_choices else [])
                 update_progress=getattr(store,'update_local_model_marking',None)
                 if update_progress:
@@ -3839,12 +4268,12 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                     update_progress(project['id'],progress={**run_progress,
                         'current_fai':item['number'],
                         'message':(f"FAI {item['number']} 本地模型自动补点：子集 {chunk_index+1}/"
-                                   f"{len(visual_point_chunks)}，{len(chunk_names)} 个源点")})
+                                   f"{len(visual_point_chunks)}，重选 {len(request_names)} 个源点")})
                 chunk_instruction=(
                     f"\n\nChunked emission protocol: this is chunk {chunk_index+1}/{len(visual_point_chunks)} of one FAI, "
                     "not a separate FAI decision. The full measurement-group counts and full XYZ list above remain "
                     "authoritative for the final merged result. In THIS JSON return markers for exactly these source "
-                    f"point names, each exactly once, and no other source point names: {json.dumps(chunk_names,ensure_ascii=False)}. "
+                    f"point names, each exactly once, and no other source point names: {json.dumps(request_names,ensure_ascii=False)}. "
                     "The service will merge disjoint chunks and then apply the complete FAI count, point coverage, "
                     "coordinate-frame, rigid-fit, and CAD ray-hit gates. Do not reduce or reinterpret the MSOP group. "
                     f"For coordinate variants, return exact coordinate_choices only for these names: {json.dumps(chunk_ambiguous,ensure_ascii=False)}. "
@@ -3858,7 +4287,7 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                     source_images.sort(key=lambda path:(0 if Path(path).name.lower().startswith('msop-') else 1,
                         Path(path).name))
                     point_candidate_images=[]
-                    for point_name in chunk_names:
+                    for point_name in request_names:
                         point_candidates=[row for row in chunk_surface_candidates
                             if point_name in (row.get('source_point_names') or [])]
                         if not point_candidates:
@@ -3889,46 +4318,62 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                 try:
                     chunk_parsed,chunk_raw_text,chunk_truncated,chunk_tokens,_chunk_aliases,repair_audit=(
                         _request_visual_marker_chunk(model,chunk_message,fai=item['number'],
-                            expected_names=chunk_names,source_points=[point for point in known_source_points
-                                if point.get('name') in chunk_names],
+                            expected_names=request_names,source_points=[point for point in known_source_points
+                                if point.get('name') in request_names],
                             allowed_source_pages=allowed_source_pages,surface_candidates=chunk_surface_candidates,
-                            global_source_points=(known_source_points if coincident_xy_z_pairs else None),
+                            global_source_points=known_source_points,
+                            method_evidence=re.sub(r'Location Definitions[\s\S]*','',method_text,
+                                flags=re.I).strip()[:6000],
+                            dependency_evidence=re.sub(r'Location Definitions[\s\S]*','',dependency_text,
+                                flags=re.I).strip()[:6000],
+                            retry_feedback=(_compact_visual_failure_feedback(validation_failures)
+                                if attempt>0 else None),
                             temperature=min(.35,.12*attempt)))
                 except Exception as exc:
                     chunk_results.append(None)
                     chunk_raw.append({'chunk':chunk_index+1,'error':f'{type(exc).__name__}: {exc}'[:300]})
-                    chunk_trace.append({'chunk':chunk_index+1,'source_point_names':chunk_names,
+                    chunk_trace.append({'chunk':chunk_index+1,'source_point_names':request_names,
                         'error':f'{type(exc).__name__}: {exc}'[:1000]})
                     continue
                 tokens+=chunk_tokens;truncated=truncated or chunk_truncated
                 chunk_raw.append(chunk_raw_text[:1200])
+                subset_source_coverage_valid=_visual_chunk_source_coverage_valid(
+                    chunk_parsed,request_names,fai=item['number'])
+                raw_chunk_parsed=chunk_parsed
+                point_repair_error=None
+                if cached is not None and repair_names and not chunk_truncated and subset_source_coverage_valid:
+                    chunk_parsed,point_repair_error=_merge_visual_chunk_point_repair(
+                        cached,chunk_parsed,repair_names)
+                if point_repair_error:
+                    chunk_parsed=None
+                    chunk_trace.append({'chunk':chunk_index+1,'source_point_names':request_names,
+                        'carried_point_names':[name for name in chunk_names if name not in repair_names],
+                        'point_repair_error':point_repair_error,'parsed_output':raw_chunk_parsed})
                 chunk_results.append(chunk_parsed if not chunk_truncated else None)
-                chunk_trace.append({'chunk':chunk_index+1,'source_point_names':chunk_names,
+                chunk_trace.append({'chunk':chunk_index+1,'source_point_names':request_names,
+                    'carried_point_names':[name for name in chunk_names if name not in request_names],
                     'truncated':bool(chunk_truncated),'generated_tokens':chunk_tokens,
                     'source_name_aliases':_chunk_aliases,'raw_output':chunk_raw_text[:6000],
-                    'parsed_output':chunk_parsed,'subset_repair_attempts':repair_audit})
-                if not chunk_truncated and not _visual_chunk_contract_issues(
-                        chunk_parsed,chunk_names,fai=item['number'],
-                        surface_candidates=chunk_surface_candidates,
-                        require_candidate_ids=candidate_required_source_names):
-                    host_issues=_candidate_host_selection_audit(
-                        chunk_parsed,chunk_surface_candidates,allowed_face_ids_by_source_name)
-                    if not host_issues:
-                        visual_chunk_cache[chunk_index]=chunk_parsed
-                        reserved_surface_positions.extend(_selected_surface_candidate_positions(
-                            chunk_parsed,chunk_surface_candidates))
+                    'parsed_output':raw_chunk_parsed,'merged_chunk_output':chunk_parsed,
+                    'subset_repair_attempts':repair_audit})
+                if (not chunk_truncated and _visual_chunk_source_coverage_valid(
+                        chunk_parsed,chunk_names,fai=item['number'])):
+                    # Cache exact source-name coverage even if the final
+                    # candidate-ID/host/geometry audit later identifies a few
+                    # bad points. Those names become the next local repair set.
+                    visual_chunk_cache[chunk_index]=chunk_parsed
+                    reserved_surface_positions.extend(_selected_surface_candidate_positions(
+                        chunk_parsed,surface_candidates))
             parsed_chunks=_merge_visual_marker_chunks(
                 chunk_results,[[point['name'] for point in chunk] for chunk in visual_point_chunks],
                 fai=item['number'])
             visual_chunk_audit.append({'attempt':attempt+1,'chunk_count':len(visual_point_chunks),
                 'chunk_failures':parsed_chunks.get('_chunk_failures',[]),'chunks':chunk_trace})
-            audit_path=store._dir(project['id'])/'automatic-learning'/(
-                f"fai-chunk-decisions-{mesh['source_sha256'][:16]}-{item['number']}.json")
-            audit_path.parent.mkdir(parents=True,exist_ok=True)
-            audit_temp=audit_path.with_suffix('.json.tmp')
+            visual_chunk_audit_path.parent.mkdir(parents=True,exist_ok=True)
+            audit_temp=visual_chunk_audit_path.with_suffix('.json.tmp')
             audit_temp.write_text(json.dumps({'fai':item['number'],'attempts':visual_chunk_audit},
                 ensure_ascii=False,indent=2),encoding='utf-8')
-            audit_temp.replace(audit_path)
+            audit_temp.replace(visual_chunk_audit_path)
             parsed_chunks['chunk_aliases']=[alias for raw_result in chunk_results
                 if isinstance(raw_result,dict)
                 for alias in _normalize_model_source_aliases(raw_result,known_source_points,allowed_source_pages)[1]]
@@ -3999,7 +4444,8 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
             rigid_group_possible=rigid_group_possible,
             candidate_selection_valid=candidate_selection_valid,
             coordinate_choices_valid=coordinate_choices_valid,truncated=truncated,
-            candidate_selection_audit=candidate_selection_audit)
+            candidate_selection_audit=candidate_selection_audit,
+            coincident_xy_z_pairs=coincident_xy_z_pairs)
         if isinstance(markers,list):
             bad_pages=[{'marker_index':index,'source_pages':marker.get('source_pages')}
                 for index,marker in enumerate(markers) if isinstance(marker,dict)
@@ -4059,18 +4505,41 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
             if not valid:
                 validation_failures.append({'code':'registration_reference_audit_failed',
                     'details':reference_audit})
+        if visual_point_chunks and visual_chunk_audit:
+            # Persist the whole-FAI geometry decision alongside subset outputs.
+            # Without this receipt, a complete 35-point chunk merge can still
+            # abstain at the rigid-fit/ray-hit gate with no actionable trace.
+            visual_chunk_audit[-1]['whole_fai_validation']={
+                'valid':bool(valid),'decision':decision,
+                'marker_count':len(markers) if isinstance(markers,list) else 0,
+                'candidate_selection_valid':bool(candidate_selection_valid),
+                'coordinate_choices_valid':bool(coordinate_choices_valid),
+                'validation_failures':_compact_visual_failure_feedback(
+                    validation_failures,max_chars=12000),
+                'registration_reference_audit':_compact_visual_failure_feedback(
+                    [reference_audit] if reference_audit else [],max_chars=6000),
+            }
+            try:
+                visual_chunk_audit_path.parent.mkdir(parents=True,exist_ok=True)
+                audit_temp=visual_chunk_audit_path.with_suffix('.json.tmp')
+                audit_temp.write_text(json.dumps({'fai':item['number'],'attempts':visual_chunk_audit},
+                    ensure_ascii=False,indent=2),encoding='utf-8')
+                audit_temp.replace(visual_chunk_audit_path)
+            except OSError:
+                # FAI acceptance must never depend on diagnostic disk writes.
+                pass
         if not valid:
             if attempt<max_visual_attempts-1:
                 if visual_point_chunks:
                     retry_names=_diagnostic_source_point_names(
                         validation_failures,[point['name'] for point in known_source_points])
                     if retry_names:
-                        visual_chunk_cache={index:result for index,result in visual_chunk_cache.items()
-                            if not retry_names.intersection(point['name'] for point in visual_point_chunks[index])}
+                        visual_chunk_repair_names=set(retry_names)
                     else:
                         # A non-localized registration or geometry failure can
                         # depend on the complete marker set; refresh the set.
                         visual_chunk_cache.clear()
+                        visual_chunk_repair_names=set()
                 if decision in ('ABSTAIN','REJECT','CANNOT_DETERMINE'):
                     correction=(
                         ' 上次选择了弃答，但本任务就是由你在本轮自动建立 FAI 级候选，不需要任何外部授权。'
@@ -4090,6 +4559,8 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                         if row.get('code')=='registration_reference_audit_failed'),None)
                     candidate_failure=next((row for row in validation_failures
                         if row.get('code')=='candidate_id_selection_invalid'),None)
+                    z_pair_failure=next((row for row in validation_failures
+                        if row.get('code')=='coincident_xy_z_pair_view_collapsed'),None)
                     correction=(
                     ' 上次没有为每个冲突点逐一选择一个完全匹配的 coordinate_variants 项。请补全 coordinate_choices，'
                     '每项必须原样复制 name、page、program、coordinate_system、xyz；不得改写、平均或省略。'
@@ -4108,6 +4579,10 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                     '不要把同一编号跨用到没有列出的点，也不要编造编号。未列入候选图册的点才可使用 view_id 和归一化 uv 直接选点。'
                     f"编号审计：{json.dumps(candidate_failure.get('details',[]),ensure_ascii=False)}。"
                     if candidate_failure else
+                    ' 上次把 MSOP 明确要求的同 XY、不同 Z 测距点放进了 ±Z 俯视图；俯视会把 Z 投影掉。'
+                    f"请只重选以下点的 CAD 视图：{json.dumps(z_pair_failure.get('details',[]),ensure_ascii=False)}。"
+                    '每一对都改用 +X、-X、+Y 或 -Y 侧视图，并分别选择各自实体上的候选点；不得共用 CAD 命中。'
+                    if z_pair_failure else
                     ' 上次选择了 ABSTAIN 或没有返回完整 markers。请检查逐条 MSOP 测量组 manifest；'
                     '只要图纸/MSOP 有可辨认的实体位置，就给出满足每组 declared_count 的完整候选；'
                     '只有证据确实无法定位时才弃答。'
@@ -4135,7 +4610,8 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                         details=failure.get('details')
                         if isinstance(details,list):
                             row['details']=[{key:entry[key] for key in (
-                                'source_point_name','selected_candidate_id','valid_candidate_ids',
+                                'source_point_name','source_point_names','selected_views',
+                                'selected_candidate_id','valid_candidate_ids',
                                 'reason','field') if key in entry}
                                 for entry in details if isinstance(entry,dict)][:40]
                         elif isinstance(details,dict):
@@ -4153,7 +4629,7 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                             continue
                         compact={key:row[key] for key in ('id','view_id','uv','feature',
                             'source_point_names','candidate_role','candidate_roles',
-                            'blocked_view_ids_by_source_name') if key in row}
+                            'blocked_uvs_by_source_name') if key in row}
                         if compact:
                             compact_candidates.append(compact)
                     compact_correction=(
@@ -4164,9 +4640,12 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                          json.dumps(compact_candidates,ensure_ascii=False,separators=(',',':'))
                          if compact_candidates else '')+
                         ('；保留坐标冲突项的原文 coordinate_choices。' if not coordinate_choices_valid else '')+
-                        ('；对已禁用的源点/视角组合必须换视角，程序会硬性拒绝。'
-                         if any(row.get('reason')=='collapsed_source_point_view_forbidden'
+                        ('；对已禁用的源点/视角/UV射线命中必须避开，同一视角的其他UV仍可选。'
+                         if any(row.get('reason')=='collapsed_source_point_ray_hit_forbidden'
                                 for row in candidate_selection_audit) else '')+
+                        ('；MSOP同XY不同Z测距点不得使用±Z视图，必须让本地模型改选侧视图并分别落在不同CAD命中。'
+                         if any(row.get('code')=='coincident_xy_z_pair_view_collapsed'
+                                for row in validation_failures) else '')+
                         '只返回符合原 JSON schema 的完整修正版。')
                     retry_message={'role':'user','content':question+compact_correction,
                         'attachments':messages[0]['attachments']}
@@ -4468,6 +4947,24 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                     'review_status':entity_review.get('status'),'receipt':entity_review.get('receipt'),
                     'receipt_sha256':entity_review.get('receipt_sha256')}
         if anchors:
+            if visual_point_chunks and visual_chunk_audit:
+                visual_chunk_audit[-1]['placement_validation']={
+                    'valid':True,'anchor_count':len(anchors),'marker_count':len(markers),
+                    'registration_hit_count':len(registration_hits),
+                    'rigid_fit_scopes':[{'program':scope[0],'coordinate_system':scope[1],
+                        **{key:fit[key] for key in ('max_residual_mm','max_surface_residual_mm',
+                            'max_pairwise_shape_error_mm','held_out_max_mm') if key in fit}}
+                        for scope,fit in rigid_fits.items()],
+                    'placement_modes':placement_modes,
+                }
+                try:
+                    visual_chunk_audit_path.parent.mkdir(parents=True,exist_ok=True)
+                    audit_temp=visual_chunk_audit_path.with_suffix('.json.tmp')
+                    audit_temp.write_text(json.dumps({'fai':item['number'],'attempts':visual_chunk_audit},
+                        ensure_ascii=False,indent=2),encoding='utf-8')
+                    audit_temp.replace(visual_chunk_audit_path)
+                except OSError:
+                    pass
             model_confidence=_confidence(parsed.get('confidence'))
             confidence=('low' if entity_review.get('status')=='confirmed' else model_confidence)
             fitted=[fit for fit in rigid_fits.values() if 'max_surface_residual_mm' in fit]
@@ -4498,19 +4995,38 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                         source_manifest_audit=source_manifest_audit,entity_review=entity_review,
                         evidence=parsed.get('evidence'),
                         generated_tokens=tokens,visual_fallback=True)
+        diagnostic=failure_diagnostic or {'reason':'complete_marker_group_not_validated',
+            'registration_point_count':len(registration_hits),
+            'rigid_fit_scopes':{str(scope):{'max_residual_mm':fit.get('max_residual_mm')}
+                                for scope,fit in rigid_fits.items()}}
+        if visual_point_chunks and visual_chunk_audit:
+            visual_chunk_audit[-1]['placement_validation']={
+                'valid':False,'marker_count':len(markers),
+                'anchor_count':len(anchors),'hit_count':len(hits),
+                'registration_hit_count':len(registration_hits),
+                'rigid_fit_scopes':[{'program':scope[0],'coordinate_system':scope[1],
+                    **{key:fit[key] for key in ('max_residual_mm','max_surface_residual_mm',
+                        'max_pairwise_shape_error_mm','held_out_max_mm') if key in fit}}
+                    for scope,fit in rigid_fits.items()],
+                'diagnostic':_compact_visual_failure_feedback([diagnostic],max_chars=10000),
+            }
+            try:
+                visual_chunk_audit_path.parent.mkdir(parents=True,exist_ok=True)
+                audit_temp=visual_chunk_audit_path.with_suffix('.json.tmp')
+                audit_temp.write_text(json.dumps({'fai':item['number'],'attempts':visual_chunk_audit},
+                    ensure_ascii=False,indent=2),encoding='utf-8')
+                audit_temp.replace(visual_chunk_audit_path)
+            except OSError:
+                pass
         if attempt<max_visual_attempts-1:
-            diagnostic=failure_diagnostic or {'reason':'complete_marker_group_not_validated',
-                'registration_point_count':len(registration_hits),
-                'rigid_fit_scopes':{str(scope):{'max_residual_mm':fit.get('max_residual_mm')}
-                                    for scope,fit in rigid_fits.items()}}
             if visual_point_chunks:
                 retry_names=_diagnostic_source_point_names(
                     diagnostic,[point['name'] for point in known_source_points])
                 if retry_names:
-                    visual_chunk_cache={index:result for index,result in visual_chunk_cache.items()
-                        if not retry_names.intersection(point['name'] for point in visual_point_chunks[index])}
+                    visual_chunk_repair_names=set(retry_names)
                 else:
                     visual_chunk_cache.clear()
+                    visual_chunk_repair_names=set()
             retry_images=model_images
             surface_candidates=list(proactive_surface_candidates)
             try:
@@ -4572,11 +5088,11 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                             surface_candidates.append(choice)
                     collapsed_depth=(diagnostic.get('reason')==
                         'distinct_source_points_collapsed_to_same_view_uv')
-                    blocked_views_by_name=_blocked_views_from_geometry_diagnostic(diagnostic)
+                    blocked_uvs_by_name=_blocked_uvs_from_geometry_diagnostic(diagnostic)
                     failed_names=list(dict.fromkeys(
                         [name for row in [*missed_points,*failed_registration_rows]
                          for name in (row.get('source_point_names') or [])]+
-                        list(blocked_views_by_name)))
+                        list(blocked_uvs_by_name)))
                     has_global_pool=any(row.get('candidate_role')=='global_surface_search'
                                         for row in surface_candidates)
                     if (not has_global_pool and
@@ -4590,25 +5106,38 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                         # immediately drowning them in coarse corner hits; all
                         # rigid-fit and complete-group gates still apply.
                         global_candidates=distributed_surface_view_candidates(
-                            mesh,grid_size=14,max_candidates_per_view=8,
+                            mesh,grid_size=24,
+                            max_candidates_per_view=min(24,max(12,2*len(failed_names))),
                             triangle_data=triangle_data)
+                        unrestricted_global_candidates=global_candidates
                         if allowed_face_ids_by_source_name:
                             global_candidates=_restrict_surface_candidates_to_source_hosts(
                                 global_candidates,failed_names,allowed_face_ids_by_source_name)
+                            covered_names={name for choice in global_candidates
+                                for name in choice.get('source_point_names') or []}
+                            unhosted_names=[name for name in failed_names
+                                if name not in covered_names and name not in allowed_face_ids_by_source_name]
+                            if unhosted_names:
+                                global_candidates.extend(_scope_global_surface_candidates(
+                                    unrestricted_global_candidates,unhosted_names,first_id=1))
+                        else:
+                            global_candidates=_scope_global_surface_candidates(
+                                global_candidates,failed_names,first_id=len(surface_candidates)+1)
                         for choice in global_candidates:
                             choice['id']=len(surface_candidates)+1
-                            choice['source_point_names']=choice.get('source_point_names') or failed_names
+                            if not choice.get('source_point_names'):
+                                continue
                             choice['candidate_roles']=['global_surface_search',
                                 'measurement_marker','registration_reference']
                             choice['feature']='global CAD ray-hit recovery option'
                             surface_candidates.append(choice)
-                    if blocked_views_by_name:
+                    if blocked_uvs_by_name:
                         for choice in surface_candidates:
                             names=choice.get('source_point_names') or []
-                            restricted={name:sorted(blocked_views_by_name[name])
-                                for name in names if name in blocked_views_by_name}
+                            restricted={name:blocked_uvs_by_name[name]
+                                for name in names if name in blocked_uvs_by_name}
                             if restricted:
-                                choice['blocked_view_ids_by_source_name']=restricted
+                                choice['blocked_uvs_by_source_name']=restricted
                     # Once a failed source point has exact CAD ray-hit
                     # candidates, require the local model to choose one of
                     # those IDs. This prevents repeated off-surface raw UV
