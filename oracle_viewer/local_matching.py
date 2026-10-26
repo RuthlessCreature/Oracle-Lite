@@ -349,8 +349,12 @@ def _source_visual_search_candidates(mesh,source_names,*,allowed_face_ids=None,
     for face_key,scoped_names in point_names.items():
         if face_key is not None and not face_key:
             continue
+        # Larger direct point groups need a wider candidate pool; six samples
+        # per orthographic view can be exhausted by the first validated chunk,
+        # leaving later source points with only duplicate CAD hits.
+        max_candidates_per_view=min(12,max(6,len(scoped_names)))
         candidates=distributed_surface_view_candidates(mesh,grid_size=24,
-            max_candidates_per_view=6,
+            max_candidates_per_view=max_candidates_per_view,
             allowed_face_ids=set(face_key) if face_key is not None else None)
         for row in candidates:
             for name in scoped_names:
