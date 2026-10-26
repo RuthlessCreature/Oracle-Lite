@@ -156,11 +156,12 @@ def test_cloned_source_scoped_candidate_ids_cannot_hide_duplicate_physical_hits(
     duplicate=next(row for row in issues
         if row.get('reason')=='duplicate_physical_surface_for_distinct_markers')
     assert duplicate['source_point_names']==['A01','J01']
-    assert duplicate['members']==[
-        {'source_point_name':'J01','candidate_id':'C1','view_id':'+Z',
-         'alternative_candidate_ids':['C4','C6']},
-        {'source_point_name':'A01','candidate_id':'C2','view_id':'+Z',
-         'alternative_candidate_ids':['C5']}]
+    members={row['source_point_name']:row for row in duplicate['members']}
+    assert members['J01']['candidate_id']=='C1'
+    assert {row['candidate_id'] for row in members['J01']['alternative_candidates']}=={'C4','C6'}
+    assert all(row['cad_xyz_mm'] and row['view_id'] and row['uv']
+        for row in members['J01']['alternative_candidates'])
+    assert members['A01']['alternative_candidates'][0]['candidate_id']=='C5'
     assert len([row for row in issues
         if row.get('reason')=='duplicate_physical_surface_for_distinct_markers'])==1
 
@@ -195,7 +196,7 @@ def test_duplicate_surface_retry_increases_temperature_and_uses_alternative_hits
     assert not truncated
     assert [row['candidate_id'] for row in parsed['markers']]==['C3','C4']
     assert model.temperatures==[0.0,0.18]
-    assert attempts[0]['contract_issues'][0]['members'][0]['alternative_candidate_ids']==['C3']
+    assert attempts[0]['contract_issues'][0]['members'][0]['alternative_candidates'][0]['candidate_id']=='C3'
 
 
 def test_geometry_recovery_requires_unique_candidate_ids_only_for_points_with_candidates():

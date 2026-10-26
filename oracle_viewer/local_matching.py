@@ -691,7 +691,7 @@ def _surface_candidate_selection_audit(parsed, surface_candidates,*,require_mark
         members=[]
         for hit_names,candidate_id,_position,view_id,_uv in group:
             name=sorted(hit_names)[0]
-            alternatives=[];seen_positions=[]
+            alternative_rows=[];seen_positions=[]
             selected_key=str(candidate_id).upper().removeprefix('C')
             for alternative_id in sorted(candidate_sources.get(name,set()),
                     key=lambda value:(not value.isdigit(),int(value) if value.isdigit() else value)):
@@ -710,11 +710,25 @@ def _surface_candidate_selection_audit(parsed, surface_candidates,*,require_mark
                        for position in seen_positions):
                     continue
                 seen_positions.append(alternative_position)
-                alternatives.append('C'+alternative_id)
-                if len(alternatives)>=12:
-                    break
+                alternative_rows.append({'candidate_id':'C'+alternative_id,
+                    'view_id':alternative.get('view_id'),'uv':alternative.get('uv'),
+                    'cad_xyz_mm':alternative_position.tolist()})
+            # Report a small spatially diverse subset with numeric CAD hit
+            # coordinates so the VLM can reason over alternatives instead of
+            # repeatedly choosing the first center-biased candidate label.
+            alternatives=[]
+            while alternative_rows and len(alternatives)<6:
+                if alternatives:
+                    chosen_positions=[np.asarray(row['cad_xyz_mm'],dtype=float) for row in alternatives]
+                    scores=[min(float(np.linalg.norm(np.asarray(row['cad_xyz_mm'])-old))
+                                for old in chosen_positions) for row in alternative_rows]
+                else:
+                    scores=[float(np.linalg.norm(np.asarray(row['cad_xyz_mm'])-positions[0]))
+                            for row in alternative_rows]
+                selected_index=int(np.argmax(scores))
+                alternatives.append(alternative_rows.pop(selected_index))
             members.append({'source_point_name':name,'candidate_id':candidate_id,
-                'view_id':view_id,'alternative_candidate_ids':alternatives})
+                'view_id':view_id,'alternative_candidates':alternatives})
         issues.append({'field':'markers','source_point_names':names,
             'members':members,
             'reason':'duplicate_physical_surface_for_distinct_markers',
@@ -2649,7 +2663,8 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
             'subset with the exact required names. Never invent coordinates or accept a wrong entity. '
             +('Different source points landed on the same CAD world position; choose candidates with distinct '
               'verified CAD hit positions, not merely different point-scoped IDs. Use the per-point alternative '
-              'candidate IDs shown in the diagnostics, with one distinct hit position for each marker. '
+              'IDs, orthographic views, and CAD XYZ coordinates shown in the diagnostics; keep each MSOP source '
+              'name on the feature it actually measures and choose a different verified CAD hit for each point. '
               'Preserve the exact marker count. '
               if duplicate_surface else '')+
             'Use ABSTAIN if evidence is insufficient. Diagnostics: '+json.dumps(issues,ensure_ascii=False)+
