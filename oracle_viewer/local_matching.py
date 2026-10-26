@@ -688,9 +688,35 @@ def _surface_candidate_selection_audit(parsed, surface_candidates,*,require_mark
             continue
         names=sorted({name for hit in group for name in hit[0]})
         positions=[hit[2] for hit in group if hit[2] is not None]
+        members=[]
+        for hit_names,candidate_id,_position,view_id,_uv in group:
+            name=sorted(hit_names)[0]
+            alternatives=[];seen_views=set()
+            selected_key=str(candidate_id).upper().removeprefix('C')
+            for alternative_id in sorted(candidate_sources.get(name,set()),
+                    key=lambda value:(not value.isdigit(),int(value) if value.isdigit() else value)):
+                if alternative_id==selected_key:
+                    continue
+                alternative=candidates_by_id.get(alternative_id) or {}
+                alternative_view=alternative.get('view_id')
+                alternative_position=alternative.get('position')
+                try:alternative_position=np.asarray(alternative_position,dtype=float)
+                except (TypeError,ValueError):alternative_position=None
+                if (alternative_position is None or alternative_position.shape!=(3,)
+                        or not np.isfinite(alternative_position).all()
+                        or any(np.linalg.norm(alternative_position-position)<1e-5
+                               for position in positions)):
+                    continue
+                if alternative_view in seen_views:
+                    continue
+                seen_views.add(alternative_view)
+                alternatives.append('C'+alternative_id)
+                if len(alternatives)>=6:
+                    break
+            members.append({'source_point_name':name,'candidate_id':candidate_id,
+                'view_id':view_id,'alternative_candidate_ids':alternatives})
         issues.append({'field':'markers','source_point_names':names,
-            'members':[{'source_point_name':sorted(hit[0])[0],
-                'candidate_id':hit[1],'view_id':hit[3]} for hit in group],
+            'members':members,
             'reason':'duplicate_physical_surface_for_distinct_markers',
             'separation_mm':(float(max(np.linalg.norm(position-positions[0])
                 for position in positions)) if len(positions)>1 else 0.0)})
@@ -2596,9 +2622,10 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
                 request_messages=[compact]
                 request_budget=_complete_visual_context_budget(request_messages)
                 current=compact
+            repair_temperature=min(.55,temperature+.18*index)
             raw,truncated,tokens=model._generate_once(request_messages,
                 max_context_chars=request_budget,
-                max_new_tokens=4096,max_images=8,temperature=temperature)
+                max_new_tokens=4096,max_images=8,temperature=repair_temperature)
         except Exception as exc:
             attempts.append({'error':f'{type(exc).__name__}: {exc}'[:1000]})
             return None,'',True,total_tokens,[],attempts
@@ -2610,6 +2637,7 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
             surface_candidates=surface_candidates,require_candidate_ids=required_ids)
         last_issues=issues
         attempts.append({'raw_output':raw,'truncated':bool(truncated),'generated_tokens':tokens,
+            'temperature':repair_temperature,
             'source_name_aliases':aliases,'contract_issues':issues})
         if not issues and not truncated:return parsed,raw,False,total_tokens,aliases,attempts
         if parsed.get('decision')=='ABSTAIN':break
@@ -2620,7 +2648,9 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
             'not a geometry authorization. Re-read the same original evidence and return the entire corrected '
             'subset with the exact required names. Never invent coordinates or accept a wrong entity. '
             +('Different source points landed on the same CAD world position; choose candidates with distinct '
-              'verified CAD hit positions, not merely different point-scoped IDs. Preserve the exact marker count. '
+              'verified CAD hit positions, not merely different point-scoped IDs. Use the per-point alternative '
+              'candidate IDs shown in the diagnostics, with one distinct hit position for each marker. '
+              'Preserve the exact marker count. '
               if duplicate_surface else '')+
             'Use ABSTAIN if evidence is insufficient. Diagnostics: '+json.dumps(issues,ensure_ascii=False)+
             '\nPrevious native response (unaccepted): '+raw}

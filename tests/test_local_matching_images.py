@@ -142,6 +142,10 @@ def test_cloned_source_scoped_candidate_ids_cannot_hide_duplicate_physical_hits(
          'source_point_names':['A01']},
         {'id':3,'view_id':'+Z','uv':[.55,.45],'position':[2.0,2.0,3.0],
          'source_point_names':['J02']},
+        {'id':4,'view_id':'-X','uv':[.55,.45],'position':[2.0,2.0,3.0],
+         'source_point_names':['J01']},
+        {'id':5,'view_id':'-Y','uv':[.55,.45],'position':[3.0,2.0,3.0],
+         'source_point_names':['A01']},
     ]
     parsed={'markers':[{'source_point_names':['J01'],'candidate_id':'C1'},
                        {'source_point_names':['A01'],'candidate_id':'C2'},
@@ -151,10 +155,45 @@ def test_cloned_source_scoped_candidate_ids_cannot_hide_duplicate_physical_hits(
         if row.get('reason')=='duplicate_physical_surface_for_distinct_markers')
     assert duplicate['source_point_names']==['A01','J01']
     assert duplicate['members']==[
-        {'source_point_name':'J01','candidate_id':'C1','view_id':'+Z'},
-        {'source_point_name':'A01','candidate_id':'C2','view_id':'+Z'}]
+        {'source_point_name':'J01','candidate_id':'C1','view_id':'+Z',
+         'alternative_candidate_ids':['C4']},
+        {'source_point_name':'A01','candidate_id':'C2','view_id':'+Z',
+         'alternative_candidate_ids':['C5']}]
     assert len([row for row in issues
         if row.get('reason')=='duplicate_physical_surface_for_distinct_markers'])==1
+
+
+def test_duplicate_surface_retry_increases_temperature_and_uses_alternative_hits():
+    candidates=[
+        {'id':1,'view_id':'+Z','uv':[.45,.45],'position':[1.,2.,3.],'source_point_names':['J01']},
+        {'id':2,'view_id':'+Z','uv':[.45,.45],'position':[1.,2.,3.],'source_point_names':['A01']},
+        {'id':3,'view_id':'-X','uv':[.55,.45],'position':[2.,2.,3.],'source_point_names':['J01']},
+        {'id':4,'view_id':'-Y','uv':[.55,.45],'position':[3.,2.,3.],'source_point_names':['A01']},
+    ]
+    outputs=[
+        {'decision':'AUTO_MARK','fai':9,'confidence':'medium','evidence':'two points',
+         'markers':[{'source_point_names':['J01'],'candidate_id':'C1','source_pages':[14]},
+                    {'source_point_names':['A01'],'candidate_id':'C2','source_pages':[14]}]},
+        {'decision':'AUTO_MARK','fai':9,'confidence':'medium','evidence':'two points',
+         'markers':[{'source_point_names':['J01'],'candidate_id':'C3','source_pages':[14]},
+                    {'source_point_names':['A01'],'candidate_id':'C4','source_pages':[14]}]},
+    ]
+    class Model:
+        temperatures=[]
+        def _generate_once(self,_messages,**kwargs):
+            self.temperatures.append(kwargs['temperature'])
+            return json.dumps(outputs[len(self.temperatures)-1]),False,120
+    model=Model()
+    message={'role':'user','content':'Choose the two measured positions.',
+        'attachments':[{'filename':'MSOP and CAD','parsed_text':'MSOP p.14','images':[]}]}
+    parsed,_,truncated,_,_,attempts=local_matching._request_visual_marker_chunk(
+        model,message,fai=9,expected_names=['J01','A01'],
+        source_points=[{'name':'J01'},{'name':'A01'}],allowed_source_pages={14},
+        surface_candidates=candidates)
+    assert not truncated
+    assert [row['candidate_id'] for row in parsed['markers']]==['C3','C4']
+    assert model.temperatures==[0.0,0.18]
+    assert attempts[0]['contract_issues'][0]['members'][0]['alternative_candidate_ids']==['C3']
 
 
 def test_geometry_recovery_requires_unique_candidate_ids_only_for_points_with_candidates():
