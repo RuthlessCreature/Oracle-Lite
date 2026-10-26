@@ -3789,11 +3789,10 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
         required_marker_groups=required_marker_groups,
         related_point_groups=_explicit_source_point_relations(
             detail.get('methods',[]),[point.get('name') for point in known_source_points]),
-        # Keep explicit same-XY Z-distance pairs atomic and isolated. A wider
-        # chunk encourages the vision model to collapse several distinct
-        # measurement XY locations onto one convenient pair of CAD hits.
-        chunk_size=(2 if coincident_xy_z_pairs else
-                    6 if candidate_required_source_names else 10),
+        # Keep explicit same-XY Z-distance pairs atomic, while including three
+        # distinct plan locations per decision so the local model can use the
+        # measurement pattern instead of guessing an isolated opposite-face pair.
+        chunk_size=6 if (coincident_xy_z_pairs or candidate_required_source_names) else 10,
         threshold=0)
         if required_marker_count==len(known_source_points) else [])
     visual_chunk_audit=[]
