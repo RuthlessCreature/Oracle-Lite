@@ -37,3 +37,27 @@ def test_marking_queue_reports_partial_coverage_as_partial(tmp_path):
         row=queue.snapshot()['tasks'][0]
     assert row['status']=='partial'
     assert '12/63' in row['progress']
+
+
+def test_marking_queue_snapshot_exposes_live_fai_classification_count(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from oracle_viewer.api import ViewerTaskQueue
+    from oracle_viewer.store import ViewerStore
+    store=ViewerStore(tmp_path);project=store.create('p','drawing','A')
+    store.update_local_model_marking(project['id'],status='running',progress={
+        'stage':'method_classification','done':0,
+        'message':'复用已确认的方法分类，仅重分失败项'})
+    state_dir=store._dir(project['id'])/'automatic-learning';state_dir.mkdir(parents=True)
+    (state_dir/'fai-strategies.json').write_text(json.dumps({
+        'status':'running','done':17,'total':63,'items':[{}]*17}),encoding='utf-8')
+    release=Event()
+    def run_marking(project_id): release.wait(5)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        queue=ViewerTaskQueue(executor,store);queue.submit(run_marking,project['id'])
+        try:
+            row=queue.snapshot()['tasks'][0]
+        finally:
+            release.set()
+    assert row['status']=='running'
+    assert row['progress']=='本地模型方法分类 17/63'

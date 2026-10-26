@@ -290,7 +290,7 @@ def nearby_surface_view_candidates(mesh, view_id, uv, *, panel_size=480,
 
 def distributed_surface_view_candidates(mesh, *, view_ids=None, panel_size=480,
                                         grid_size=32, max_candidates_per_view=10,
-                                        triangle_data=None):
+                                        triangle_data=None, allowed_face_ids=None):
     """Sample verified ray hits across whole orthographic panels for recovery.
 
     These are visual search choices, never placements. They let the local
@@ -306,6 +306,7 @@ def distributed_surface_view_candidates(mesh, *, view_ids=None, panel_size=480,
     except (ValueError,TypeError):
         return []
     result=[]
+    allowed_face_ids=set(allowed_face_ids) if allowed_face_ids is not None else None
     ticks=(np.arange(grid_size,dtype=float)+0.5)/grid_size
     for view_id in view_ids:
         if view_id not in VIEWS:
@@ -316,7 +317,7 @@ def distributed_surface_view_candidates(mesh, *, view_ids=None, panel_size=480,
             for u in ticks:
                 hit=_ray_hit_view_triangles(triangles,face_ids,view_id,float(u),float(v),
                     panel_size=panel_size,projection=projection)
-                if hit is not None:
+                if hit is not None and (allowed_face_ids is None or hit.get('face_id') in allowed_face_ids):
                     hits.append(dict(view_id=view_id,uv=[float(u),float(v)],
                         face_id=hit['face_id'],position=hit['position']))
         if not hits:
@@ -348,7 +349,7 @@ def render_surface_candidate_atlas(atlas_path: str | Path, output_path: str | Pa
         font=ImageFont.truetype('DejaVuSans.ttf',9)
     except OSError:
         font=ImageFont.load_default()
-    margin=22
+    margin=22;grouped={}
     for candidate in surface_candidates:
         view_id=candidate.get('view_id')
         if view_id not in VIEWS:
@@ -360,11 +361,27 @@ def render_surface_candidate_atlas(atlas_path: str | Path, output_path: str | Pa
             continue
         x=col*panel_size+margin+float(uv[0])*(panel_size-2*margin)
         y=row*panel_size+margin+float(uv[1])*(panel_size-2*margin)
-        radius=5
+        grouped.setdefault((view_id,round(x),round(y)),[]).append((candidate,x,y))
+    for (_view_id,_x,_y),rows in grouped.items():
+        candidate,x,y=rows[0];radius=5
         draw.ellipse((x-radius,y-radius,x+radius,y+radius),fill='#16834a',outline='white',width=1)
-        label=f"C{candidate.get('id','?')}"
-        draw.rectangle((x+radius+1,y-radius-2,x+radius+20,y+radius+2),fill='white')
-        draw.text((x+radius+2,y-radius-2),label,fill='#12643a',font=font)
+        labels=[]
+        for candidate,_,_ in rows:
+            names=candidate.get('source_point_names') or []
+            suffix=(str(names[0]).split('_')[-1] if len(names)==1 else '')
+            labels.append(f"C{candidate.get('id','?')} {suffix}".strip())
+        row_height=11;stack_height=row_height*len(labels)
+        label_x=(x+radius+2 if x+radius+max((draw.textbbox((0,0),label,font=font)[2]
+                    for label in labels),default=20)+4 < (_x//panel_size+1)*panel_size
+                 else x-radius-3-max(draw.textbbox((0,0),label,font=font)[2] for label in labels))
+        label_y=y-radius-2
+        if label_y+stack_height>((_y//panel_size+1)*panel_size-4):
+            label_y=(_y//panel_size+1)*panel_size-4-stack_height
+        for index,(candidate,label) in enumerate(zip(rows,labels)):
+            yy=label_y+index*row_height
+            width=draw.textbbox((0,0),label,font=font)[2]+3
+            draw.rectangle((label_x-1,yy,label_x+width,yy+row_height-1),fill='white')
+            draw.text((label_x,yy),label,fill='#12643a',font=font)
     target.parent.mkdir(parents=True,exist_ok=True)
     temporary=target.with_suffix(target.suffix+'.tmp')
     image.save(temporary,format='PNG',optimize=True)

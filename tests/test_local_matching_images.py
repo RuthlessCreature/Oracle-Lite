@@ -15,7 +15,7 @@ from oracle_viewer.local_matching import (_method_page_images, _compact_registra
     _visual_marker_validation_issues, _complete_marker_registration_references)
 from oracle_viewer.local_matching import (_xyz_rigid_fit_required_scopes,
     _missing_required_xyz_fits, _normalize_model_source_aliases,
-    _partition_visual_source_points, _merge_visual_marker_chunks,
+    _explicit_source_point_relations, _partition_visual_source_points, _merge_visual_marker_chunks,
     _select_coordinate_variants_with_local_model)
 from oracle_viewer.msop_coordinates import _explicit_measure_point_names
 
@@ -50,6 +50,28 @@ def test_compact_visual_retry_keeps_complete_source_attachment_and_candidate_con
     assert compact['attachments'][0]['images']==['msop.png','drawing.png']
     assert 'LAST_SOURCE_POINT' in compact['attachments'][0]['parsed_text']
     assert 'blocked_view_ids_by_source_name' in compact['content']
+
+
+def test_chunk_retry_compaction_only_includes_candidates_for_its_source_points():
+    source={'role':'user','content':'large repeated retry '+('x'*60000),
+        'attachments':[{'filename':'MSOP','parsed_text':'full source text','images':['m.png']} ]}
+    compact=local_matching._compact_visual_evidence_message(source,fai=10,
+        source_points=[{'name':'CWS_S01'}],source_pages=[73],
+        surface_candidates=[{'id':1,'view_id':'+Z','uv':[.2,.3],
+            'source_point_names':['CWS_S01']},
+            {'id':2,'view_id':'-Z','uv':[.6,.7],
+             'source_point_names':['CWS_N14']}])
+    assert 'CWS_S01' in compact['content'] and 'CWS_N14' not in compact['content']
+    assert compact['attachments'][0]['parsed_text']=='full source text'
+
+
+def test_validation_diagnostic_name_extraction_is_exact_and_nested():
+    names=local_matching._diagnostic_source_point_names([
+        {'code':'candidate_id_selection_invalid','details':[
+            {'source_point_name':'CWS_S01'},{'source_point_name':'CWS_NOT_A_POINT'}]},
+        {'code':'source_point_coverage_incomplete','missing_names':['CWS_N14']}],
+        ['CWS_S01','CWS_N14'])
+    assert names=={'CWS_S01','CWS_N14'}
 
 
 def test_visual_chunk_compacts_prompt_on_budget_error_without_truncating_source_evidence():
@@ -386,6 +408,21 @@ def test_small_complete_measurement_groups_can_enter_candidate_id_repair_path():
     chunks=_partition_visual_source_points(points,required_marker_groups=groups,threshold=0)
     assert [[point['name'] for point in chunk] for chunk in chunks]==[
         ['R1_PNT_P2','S1_PNT_Z1','R1_PNT_Z3']]
+
+
+def test_explicit_msop_point_pairs_stay_together_when_large_group_is_chunked():
+    names=[*(f'THICK_J{i:02}' for i in range(1,7)),
+           *(f'THICK_A{i:02}' for i in range(1,7))]
+    methods=[{'text':'Output Z distance (6x) from point to point '
+        '(J01-A01,J02-A02,J03-A03,J04-A04,J05-A05,J06-A06).'}]
+    pairs=_explicit_source_point_relations(methods,names)
+    assert pairs==[[f'THICK_J{i:02}',f'THICK_A{i:02}'] for i in range(1,7)]
+    chunks=_partition_visual_source_points([{'name':name} for name in names],
+        required_marker_groups=[{'source_point_names':names}],related_point_groups=pairs,
+        chunk_size=10,threshold=0)
+    assert [[point['name'] for point in chunk] for chunk in chunks]==[
+        [name for i in range(1,6) for name in (f'THICK_J{i:02}',f'THICK_A{i:02}')],
+        ['THICK_J06','THICK_A06']]
 
 
 def test_small_visual_chunk_requires_candidate_id_when_an_exact_hit_option_exists():

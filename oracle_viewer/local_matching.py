@@ -5,6 +5,7 @@ import json
 import functools
 import hashlib
 import itertools
+import math
 import re
 from contextlib import nullcontext
 from urllib.parse import urlparse
@@ -67,12 +68,16 @@ def _compact_visual_evidence_message(message,*,fai,source_points,source_pages,
     output when a retry would exceed the local request budget.
     """
     point_names=[point.get('name') for point in source_points if point.get('name')]
+    point_name_set=set(point_names)
     pages=sorted({page for page in source_pages if type(page) is int})
     groups=[{key:group[key] for key in ('group_id','declared_count','source_point_names',
         'measured_features','source_page') if key in group}
         for group in required_marker_groups if isinstance(group,dict)]
     compact_candidates=[]
     for candidate in surface_candidates:
+        candidate_names=set(candidate.get('source_point_names') or [])
+        if point_name_set and candidate_names and not candidate_names.intersection(point_name_set):
+            continue
         row={key:candidate[key] for key in ('id','view_id','uv','feature','source_point_names',
             'candidate_role','candidate_roles','blocked_view_ids_by_source_name') if key in candidate}
         if row:
@@ -323,25 +328,86 @@ def _blocked_views_from_geometry_diagnostic(diagnostic):
     return blocked
 
 
-def _source_visual_search_candidates(mesh,source_names,*,allowed_face_ids=None):
+def _source_visual_search_candidates(mesh,source_names,*,allowed_face_ids=None,
+        allowed_face_ids_by_source_name=None):
     """Create a model-selectable atlas of exact CAD ray hits for XYZ-missing points."""
     names=sorted({name for name in source_names if isinstance(name,str) and name})
     if not names:
         return []
-    candidates=distributed_surface_view_candidates(mesh,grid_size=14,
-        max_candidates_per_view=8)
-    if allowed_face_ids:
-        candidates=[row for row in candidates if row.get('face_id') in allowed_face_ids]
+    # Filter ray hits to each locally selected host before farthest-point
+    # sampling. Sampling the whole assembly first can spend all six slots on
+    # large bodies and leave a small rail or tab with no selectable hit.
+    base_faces=set(allowed_face_ids) if allowed_face_ids else None
+    point_names={}
+    for name in names:
+        scoped=allowed_face_ids_by_source_name.get(name) if allowed_face_ids_by_source_name else None
+        eligible=(base_faces & set(scoped)) if base_faces is not None and scoped is not None else (
+            set(scoped) if scoped is not None else base_faces)
+        point_names.setdefault(tuple(sorted(eligible)) if eligible is not None else None,[]).append(name)
+    output=[]
+    for face_key,scoped_names in point_names.items():
+        if face_key is not None and not face_key:
+            continue
+        candidates=distributed_surface_view_candidates(mesh,grid_size=24,
+            max_candidates_per_view=6,
+            allowed_face_ids=set(face_key) if face_key is not None else None)
+        for row in candidates:
+            for name in scoped_names:
+                # Keep candidate IDs source-specific. The exact same physical
+                # hit may be a tempting but invalid answer for several measured
+                # points; point-scoped IDs let validation reject cross-point reuse.
+                choice=dict(row)
+                choice['id']=len(output)+1
+                choice['source_point_names']=[name]
+                choice['candidate_role']='global_surface_search'
+                choice['candidate_roles']=['global_surface_search','measurement_marker']
+                choice['feature']='proactive CAD ray-hit search option'
+                output.append(choice)
+    return output
+
+
+def _restrict_surface_candidates_to_source_hosts(candidates,source_names,host_face_ids):
+    """Give each measured source point only ray hits on its locally selected host bodies."""
+    if not host_face_ids:return list(candidates)
     output=[]
     for row in candidates:
-        choice=dict(row)
-        choice['id']=len(output)+1
-        choice['source_point_names']=names
-        choice['candidate_role']='global_surface_search'
-        choice['candidate_roles']=['global_surface_search','measurement_marker']
-        choice['feature']='proactive CAD ray-hit search option'
-        output.append(choice)
+        for name in source_names:
+            if name not in host_face_ids or row.get('face_id') not in host_face_ids[name]:continue
+            choice=dict(row);choice['id']=len(output)+1
+            choice['source_point_names']=[name]
+            choice['candidate_role']='global_surface_search'
+            choice['candidate_roles']=['global_surface_search','measurement_marker']
+            output.append(choice)
     return output
+
+
+def _source_marker_host_mismatches(marker_hits,host_face_ids,host_part_ids):
+    """Check each named marker's resolved CAD face against its selected host body map."""
+    mismatches=[]
+    for marker,anchor in marker_hits:
+        for name in marker.get('source_point_names') or []:
+            expected_faces=host_face_ids.get(name)
+            if expected_faces is not None and anchor.get('face_id') not in expected_faces:
+                mismatches.append({'source_point_name':name,
+                    'expected_part_ids':host_part_ids.get(name,[]),
+                    'actual_face_id':anchor.get('face_id'),'marker_feature':marker.get('feature')})
+    return mismatches
+
+
+def _exact_surface_candidate_hit(marker,surface_candidates):
+    """Resolve a selected candidate ID to its stored CAD hit, even if a body occludes its UV."""
+    candidate_id=marker.get('candidate_id',marker.get('candidate'))
+    if candidate_id is None:return None
+    key=str(candidate_id).strip().upper().removeprefix('C')
+    for candidate in surface_candidates or []:
+        if str(candidate.get('id')).strip().upper().removeprefix('C')!=key:continue
+        face_id=candidate.get('face_id');position=candidate.get('position')
+        if (not isinstance(face_id,str) or not isinstance(position,list) or len(position)!=3
+                or any(not isinstance(value,(int,float)) or isinstance(value,bool) or not math.isfinite(value)
+                       for value in position)):
+            return None
+        return dict(face_id=face_id,position=[float(value) for value in position],label_offset=[32,-26])
+    return None
 
 
 def _rigid_source_anchors(mesh, source_xyz, correspondence_xyz, *, max_fit_residual_mm=0.75,
@@ -569,6 +635,39 @@ def _surface_candidate_selection_audit(parsed, surface_candidates,*,require_mark
                         'selected_candidate_id':candidate_id,'valid_candidate_ids':['C'+value for value in allowed]})
                     if len(issues)>=40:
                         return issues
+    return issues
+
+
+def _candidate_host_selection_audit(parsed,surface_candidates,allowed_face_ids_by_source_name):
+    """Reject numbered hits whose exact CAD face is outside the named point's selected host."""
+    if not allowed_face_ids_by_source_name or not isinstance(parsed,dict):
+        return []
+    by_id={str(row.get('id')).strip().upper().removeprefix('C'):row
+        for row in surface_candidates or [] if isinstance(row,dict) and row.get('id') is not None}
+    issues=[]
+    for marker in parsed.get('markers') or []:
+        if not isinstance(marker,dict):
+            continue
+        candidate_id=marker.get('candidate_id',marker.get('candidate'))
+        if candidate_id is None:
+            continue
+        key=str(candidate_id).strip().upper().removeprefix('C')
+        candidate=by_id.get(key)
+        names=marker.get('source_point_names') or []
+        for name in names:
+            allowed_faces=allowed_face_ids_by_source_name.get(name)
+            if allowed_faces is None:
+                continue
+            if candidate and candidate.get('face_id') in allowed_faces:
+                continue
+            valid_ids=sorted((str(row.get('id')).strip().upper().removeprefix('C')
+                for row in surface_candidates or [] if isinstance(row,dict)
+                and row.get('id') is not None and row.get('face_id') in allowed_faces
+                and name in (row.get('source_point_names') or [])),
+                key=lambda value:(not value.isdigit(),int(value) if value.isdigit() else value))
+            issues.append({'field':'markers','source_point_name':name,
+                'selected_candidate_id':candidate_id,'valid_candidate_ids':['C'+value for value in valid_ids],
+                'reason':'candidate_face_outside_selected_source_host'})
     return issues
 
 
@@ -2130,8 +2229,28 @@ def _normalize_model_source_aliases(parsed, known_source_points, allowed_source_
     return result,changed
 
 
+def _explicit_source_point_relations(methods,source_point_names):
+    """Read explicit MSOP point-to-point expressions into atomic inference groups."""
+    names=set(name for name in source_point_names if isinstance(name,str) and name)
+    if len(names)<2:return []
+    def resolve(token):
+        matches=[name for name in names if name==token or name.endswith('_'+token)]
+        return matches[0] if len(matches)==1 else None
+    relations=[];seen=set()
+    pair_pattern=re.compile(r'(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9_]{0,40})\s*[-–]\s*'
+                            r'([A-Za-z][A-Za-z0-9_]{0,40})(?![A-Za-z0-9_])')
+    for method in methods or []:
+        text=method.get('text','') if isinstance(method,dict) else str(method)
+        for left,right in pair_pattern.findall(text):
+            a,b=resolve(left),resolve(right)
+            pair=tuple((a,b)) if a and b and a!=b else None
+            if pair and pair not in seen:
+                seen.add(pair);relations.append(list(pair))
+    return relations
+
+
 def _partition_visual_source_points(source_points, *, required_marker_groups=None,
-                                   chunk_size=10, threshold=14):
+                                   related_point_groups=None,chunk_size=10, threshold=14):
     """Partition large XYZ marker sets for local-model decisions.
 
     The partition changes only the inference payload, never the validation
@@ -2144,6 +2263,15 @@ def _partition_visual_source_points(source_points, *, required_marker_groups=Non
     by_name={row['name']:row for row in points}
     source_names=set(by_name)
     groups=[];assigned=set()
+    # Explicit point-to-point relationships (for example J01-A01) remain in
+    # the same model decision, even when one MSOP measurement group is larger
+    # than the bounded output size. This prevents a chunk from losing the
+    # counterpart needed to identify an opposite-face contact.
+    for relation in related_point_groups or []:
+        names=[name for name in relation
+               if name in source_names and name not in assigned]
+        if len(names)>1 and len(names)<=chunk_size:
+            groups.append(names);assigned.update(names)
     for group in required_marker_groups or []:
         names=[name for name in group.get('source_point_names',[])
                if name in source_names and name not in assigned]
@@ -2266,6 +2394,22 @@ def _visual_chunk_contract_issues(parsed,expected_names,*,fai,surface_candidates
     return issues
 
 
+def _diagnostic_source_point_names(rows,known_names):
+    """Extract only exact MSOP point names from nested validation diagnostics."""
+    known=set(known_names);found=set()
+    def visit(value,key=None):
+        if isinstance(value,dict):
+            for child_key,child in value.items():visit(child,child_key)
+        elif isinstance(value,list):
+            for child in value:visit(child,key)
+        elif isinstance(value,str) and key in {
+            'source_point_name','source_point_names','missing_names','missing_source_points',
+            'invalid_source_points','point_name','point_names'}:
+            if value in known:found.add(value)
+    visit(rows)
+    return found
+
+
 def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_points,
         allowed_source_pages,surface_candidates=(),temperature=0.,max_repairs=2):
     """Ask the native model to repair only a malformed subset response.
@@ -2276,8 +2420,7 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
     options={name:['C'+str(candidate['id']).removeprefix('C') for candidate in surface_candidates
         if candidate.get('id') is not None and candidate.get('view_id') not in
             set(candidate.get('blocked_view_ids_by_source_name',{}).get(name,[])) and
-        (name in (candidate.get('source_point_names') or []) or
-         candidate.get('candidate_role')=='global_surface_search')]
+        name in (candidate.get('source_point_names') or [])]
         for name in expected_names}
     blocked={name:sorted({view for candidate in surface_candidates
         for view in candidate.get('blocked_view_ids_by_source_name',{}).get(name,[])})
@@ -2306,7 +2449,8 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
                 # attachment intact, replacing only repeated instructions and
                 # prior output with the exact subset contract and diagnostics.
                 compact=_compact_visual_evidence_message(base,fai=fai,
-                    source_points=source_points,source_pages=allowed_source_pages,
+                    source_points=[point for point in source_points
+                        if point.get('name') in expected_names],source_pages=allowed_source_pages,
                     surface_candidates=surface_candidates,mode='markers',
                     failure_summary=last_issues)
                 compact['content']+=('\nThis is chunk '+json.dumps(expected_names,ensure_ascii=False)+
@@ -2960,7 +3104,7 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                     reason='local_multimodal_vision_model_unavailable')
     images=_method_page_images(store,project,detail,model,item['number'])
     part_context=(candidate or {}).get('evidence',{}).get('part_identity_context') or {}
-    allowed_part_faces=set()
+    allowed_part_faces=set();allowed_face_ids_by_source_name={}
     if part_context:
         from .part_identity import cad_parts,render_part_catalog
         parts=cad_parts(mesh);selected_ids=part_context.get('part_ids') or []
@@ -2969,6 +3113,16 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                 or len(selected)!=len(set(selected_ids))):
             return dict(fai=item['number'],result='abstain_or_invalid',reason='part_identity_evidence_invalid')
         allowed_part_faces={face_id for part in selected for face_id in part['face_ids']}
+        selected_by_id={part['part_id']:part for part in selected}
+        host_map=part_context.get('source_point_host_part_ids') or {}
+        if host_map:
+            for name,host_ids in host_map.items():
+                if (not isinstance(name,str) or not isinstance(host_ids,list) or not host_ids
+                        or any(host_id not in selected_by_id for host_id in host_ids)):
+                    return dict(fai=item['number'],result='abstain_or_invalid',
+                        reason='part_identity_source_host_map_invalid')
+                allowed_face_ids_by_source_name[name]={face_id for host_id in host_ids
+                    for face_id in selected_by_id[host_id]['face_ids']}
         images=list(dict.fromkeys([*images,*render_part_catalog(mesh,selected,
             store._dir(project['id'])/'automatic-learning'/'part-catalog')]))
     msop_image=next((path for path in images if Path(path).name.startswith('msop-')),None)
@@ -3258,9 +3412,12 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                         len(point.get('coordinate_variants') or []) for point in known_source_points))
     allowed_source_pages={page.get('page') for page in [*detail.get('methods',[]),*detail.get('dependencies',[])]
                           if isinstance(page.get('page'),int)}
-    surface_candidates=_source_visual_search_candidates(mesh,visual_candidate_source_names,
-        allowed_face_ids=allowed_part_faces)
-    candidate_required_source_names=set(visual_candidate_source_names)
+    candidate_search_source_names=sorted(set(visual_candidate_source_names)|
+        set(allowed_face_ids_by_source_name))
+    surface_candidates=_source_visual_search_candidates(mesh,candidate_search_source_names,
+        allowed_face_ids=allowed_part_faces,
+        allowed_face_ids_by_source_name=allowed_face_ids_by_source_name or None)
+    candidate_required_source_names=set(visual_candidate_source_names)|set(allowed_face_ids_by_source_name)
     if surface_candidates:
         candidate_atlas=store._dir(project['id'])/'automatic-learning'/(
             f"cad-proactive-candidate-atlas-{mesh['source_sha256'][:16]}-{item['number']}.png")
@@ -3276,9 +3433,14 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
     # local-model decision rather than terminating after only two retries.
     max_visual_attempts=6
     visual_point_chunks=(_partition_visual_source_points(known_source_points,
-        required_marker_groups=required_marker_groups,threshold=0)
+        required_marker_groups=required_marker_groups,
+        related_point_groups=_explicit_source_point_relations(
+            detail.get('methods',[]),[point.get('name') for point in known_source_points]),
+        chunk_size=6 if candidate_required_source_names else 10,
+        threshold=0)
         if required_marker_count==len(known_source_points) else [])
     visual_chunk_audit=[]
+    visual_chunk_cache={}
     for attempt in range(max_visual_attempts):
         if visual_point_chunks:
             # Large MSOP point sets are difficult for the vision model to emit
@@ -3291,6 +3453,12 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
             ambiguous_names=set(ambiguous_coordinate_points)
             for chunk_index,chunk in enumerate(visual_point_chunks):
                 chunk_names=[point['name'] for point in chunk]
+                if chunk_index in visual_chunk_cache:
+                    cached=visual_chunk_cache[chunk_index]
+                    chunk_results.append(cached)
+                    chunk_trace.append({'chunk':chunk_index+1,'source_point_names':chunk_names,
+                        'reused_validated_chunk':True,'parsed_output':cached})
+                    continue
                 chunk_ambiguous=(sorted(ambiguous_names.intersection(chunk_names))
                                  if not preselected_coordinate_choices else [])
                 update_progress=getattr(store,'update_local_model_marking',None)
@@ -3310,12 +3478,43 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                     f"For coordinate variants, return exact coordinate_choices only for these names: {json.dumps(chunk_ambiguous,ensure_ascii=False)}. "
                     "registration_points may be empty in this chunk; the complete merged marker correspondences will "
                     "be checked together. Keep the usual JSON fields and cite the MSOP pages for this FAI.")
+                chunk_attachments=messages[0].get('attachments',[])
+                if surface_candidates:
+                    source_images=[path for path in images
+                        if Path(path).name.lower().startswith(('msop-','drawing-'))]
+                    source_images.sort(key=lambda path:(0 if Path(path).name.lower().startswith('msop-') else 1,
+                        Path(path).name))
+                    point_candidate_images=[]
+                    for point_name in chunk_names:
+                        point_candidates=[row for row in surface_candidates
+                            if point_name in (row.get('source_point_names') or [])]
+                        if not point_candidates:
+                            continue
+                        point_key=hashlib.sha256(point_name.encode()).hexdigest()[:10]
+                        point_atlas=store._dir(project['id'])/'automatic-learning'/(
+                            f"cad-point-candidates-v2-{mesh['source_sha256'][:12]}-{item['number']}-{point_key}.png")
+                        small_atlas=store._dir(project['id'])/'automatic-learning'/(
+                            f"cad-point-candidate-base-{mesh['source_sha256'][:12]}-240.png")
+                        if not small_atlas.is_file():
+                            render_cad_view_atlas(mesh,small_atlas,panel_size=240)
+                        render_surface_candidate_atlas(small_atlas,point_atlas,point_candidates,
+                            panel_size=240)
+                        point_candidate_images.append(str(point_atlas))
+                    # Give the model one clean candidate atlas per source point.
+                    # The six-view atlas is repeated intentionally: this keeps
+                    # point-specific candidate IDs legible instead of stacking
+                    # dozens of IDs at each shared CAD sample in one image.
+                    if point_candidate_images:
+                        chunk_images=list(dict.fromkeys([*source_images[:2],*point_candidate_images]))[:8]
+                        chunk_attachments=[{'filename':'MSOP and point-specific six-view CAD candidate atlases',
+                            'parsed_text':context,'images':chunk_images}]
                 chunk_message={'role':'user','content':messages[0]['content']+chunk_instruction,
-                    'attachments':messages[0].get('attachments',[])}
+                    'attachments':chunk_attachments}
                 try:
                     chunk_parsed,chunk_raw_text,chunk_truncated,chunk_tokens,_chunk_aliases,repair_audit=(
                         _request_visual_marker_chunk(model,chunk_message,fai=item['number'],
-                            expected_names=chunk_names,source_points=known_source_points,
+                            expected_names=chunk_names,source_points=[point for point in known_source_points
+                                if point.get('name') in chunk_names],
                             allowed_source_pages=allowed_source_pages,surface_candidates=surface_candidates,
                             temperature=min(.35,.12*attempt)))
                 except Exception as exc:
@@ -3331,6 +3530,14 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                     'truncated':bool(chunk_truncated),'generated_tokens':chunk_tokens,
                     'source_name_aliases':_chunk_aliases,'raw_output':chunk_raw_text[:6000],
                     'parsed_output':chunk_parsed,'subset_repair_attempts':repair_audit})
+                if not chunk_truncated and not _visual_chunk_contract_issues(
+                        chunk_parsed,chunk_names,fai=item['number'],
+                        surface_candidates=surface_candidates,
+                        require_candidate_ids=candidate_required_source_names):
+                    host_issues=_candidate_host_selection_audit(
+                        chunk_parsed,surface_candidates,allowed_face_ids_by_source_name)
+                    if not host_issues:
+                        visual_chunk_cache[chunk_index]=chunk_parsed
             parsed_chunks=_merge_visual_marker_chunks(
                 chunk_results,[[point['name'] for point in chunk] for chunk in visual_point_chunks],
                 fai=item['number'])
@@ -3400,6 +3607,8 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
         candidate_selection_audit=_surface_candidate_selection_audit(raw_parsed,surface_candidates,
             require_marker_ids=(True if drawing_manifest_audit.get('status')=='confirmed'
                 else candidate_required_source_names))
+        candidate_selection_audit.extend(_candidate_host_selection_audit(
+            raw_parsed,surface_candidates,allowed_face_ids_by_source_name))
         candidate_selection_valid=not candidate_selection_audit
         parsed=_resolve_surface_candidate_ids(raw_parsed,surface_candidates)
         decision=re.sub(r'[^A-Z_]','',str(parsed.get('decision') or '').upper())
@@ -3473,6 +3682,16 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                     'details':reference_audit})
         if not valid:
             if attempt<max_visual_attempts-1:
+                if visual_point_chunks:
+                    retry_names=_diagnostic_source_point_names(
+                        validation_failures,[point['name'] for point in known_source_points])
+                    if retry_names:
+                        visual_chunk_cache={index:result for index,result in visual_chunk_cache.items()
+                            if not retry_names.intersection(point['name'] for point in visual_point_chunks[index])}
+                    else:
+                        # A non-localized registration or geometry failure can
+                        # depend on the complete marker set; refresh the set.
+                        visual_chunk_cache.clear()
                 if decision in ('ABSTAIN','REJECT','CANNOT_DETERMINE'):
                     correction=(
                         ' 上次选择了弃答，但本任务就是由你在本轮自动建立 FAI 级候选，不需要任何外部授权。'
@@ -3545,8 +3764,14 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                                 'reason','missing_source_points','invalid_source_points',
                                 'coordinate_system','program','max_residual_mm') if key in details}
                         compact_failures.append(row)
+                    retry_names=_diagnostic_source_point_names(
+                        validation_failures,[point['name'] for point in known_source_points])
                     compact_candidates=[]
                     for row in surface_candidates:
+                        row_names=set(row.get('source_point_names') or [])
+                        if visual_point_chunks and (
+                                not retry_names or not row_names.intersection(retry_names)):
+                            continue
                         compact={key:row[key] for key in ('id','view_id','uv','feature',
                             'source_point_names','candidate_role','candidate_roles',
                             'blocked_view_ids_by_source_name') if key in row}
@@ -3639,7 +3864,13 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                     source_point_names=marker.get('source_point_names'),
                     view_id=marker.get('view_id'),uv=marker.get('uv')) for marker in group]}
         for marker in markers:
-            hit=ray_hit_view(mesh,marker['view_id'],float(marker['uv'][0]),float(marker['uv'][1]))
+            # The numbered candidate is already an exact CAD ray hit from
+            # candidate generation. Re-intersecting only its 2D projection
+            # through the complete assembly can select an occluding neighbor
+            # body and silently change the candidate's host entity.
+            hit=_exact_surface_candidate_hit(marker,surface_candidates)
+            if hit is None:
+                hit=ray_hit_view(mesh,marker['view_id'],float(marker['uv'][0]),float(marker['uv'][1]))
             if not hit:
                 missed_markers.append(marker)
                 if failure_diagnostic is None:
@@ -3647,6 +3878,13 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                         'feature':marker.get('feature'),'view_id':marker.get('view_id'),'uv':marker.get('uv')}
                 continue
             hits.append((marker,dict(face_id=hit['face_id'],position=hit['position'],label_offset=[32,-26])))
+        if allowed_face_ids_by_source_name and hits:
+            host_mismatches=_source_marker_host_mismatches(hits,
+                allowed_face_ids_by_source_name,part_context.get('source_point_host_part_ids') or {})
+            if host_mismatches:
+                failure_diagnostic={'reason':'source_point_host_mismatch','details':host_mismatches[:30],
+                    'instruction':'Each named MSOP point must lie on one of its locally model-selected host bodies.'}
+                hits=[]
         if missed_markers and failure_diagnostic:
             failure_diagnostic['missed_marker_points']=[dict(
                 feature=marker.get('feature'),source_point_names=marker.get('source_point_names'),
@@ -3958,9 +4196,12 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                         global_candidates=distributed_surface_view_candidates(
                             mesh,grid_size=14,max_candidates_per_view=8,
                             triangle_data=triangle_data)
+                        if allowed_face_ids_by_source_name:
+                            global_candidates=_restrict_surface_candidates_to_source_hosts(
+                                global_candidates,failed_names,allowed_face_ids_by_source_name)
                         for choice in global_candidates:
                             choice['id']=len(surface_candidates)+1
-                            choice['source_point_names']=failed_names
+                            choice['source_point_names']=choice.get('source_point_names') or failed_names
                             choice['candidate_roles']=['global_surface_search',
                                 'measurement_marker','registration_reference']
                             choice['feature']='global CAD ray-hit recovery option'

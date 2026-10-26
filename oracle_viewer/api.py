@@ -191,6 +191,26 @@ class ViewerTaskQueue:
             try:
                 project = self.store.get(row['project_id']) if row.get('project_id') else None
                 row['project'] = (project or {}).get('drawing_no') or row.get('project_id') or '全局任务'
+                if project and row.get('kind') == 'run_marking':
+                    marking = project.get('local_model_marking') or {}
+                    progress = marking.get('progress') or {}
+                    message = progress.get('message') if isinstance(progress, dict) else None
+                    stage = progress.get('stage') if isinstance(progress, dict) else None
+                    done, total = progress.get('done'), progress.get('total')
+                    if stage == 'method_classification':
+                        try:
+                            classification_path = (self.store._dir(row['project_id']) /
+                                'automatic-learning' / 'fai-strategies.json')
+                            classification = json.loads(classification_path.read_text(encoding='utf-8'))
+                            done = classification.get('done', len(classification.get('items') or []))
+                            total = classification.get('total', total)
+                            message = f'本地模型方法分类 {done}/{total}'
+                        except (OSError, ValueError, TypeError):
+                            message = message or '本地模型方法分类'
+                    elif isinstance(done, int) and isinstance(total, int) and total > 0:
+                        message = f'{message or "正在执行"} · {done}/{total}'
+                    if message:
+                        row['progress'] = message
             except Exception:
                 row['project'] = row.get('project_id') or '全局任务'
         rows.sort(key=lambda r: (0 if r['status'] == 'running' else 1 if r['status'] == 'queued' else 2,
@@ -627,7 +647,7 @@ def attach_viewer(app, state):
                    'cad': (data.get('model') or {}).get('source_sha256'), 'candidates': candidates,
                    # Bump when candidate search/acceptance behavior changes so a
                    # completed run cannot suppress retries under a newer engine.
-                   'automation_ruleset_revision': 66,
+                   'automation_ruleset_revision': 72,
                    'coverage': marker_coverage(store.items(data)),
                    'registration_receipt':hashlib.sha256(registration.read_bytes()).hexdigest() if registration.is_file() else None,
                    'registration_alternatives':[(p.name,hashlib.sha256(p.read_bytes()).hexdigest()) for p in
