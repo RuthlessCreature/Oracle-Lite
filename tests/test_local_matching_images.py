@@ -1508,3 +1508,8 @@ def test_manifest_retry_explains_numeric_confidence_protocol_error():
             return json.dumps(dict(decision='CONFIRM_MANIFEST',fai=1,
                 source_point_names=['DATUMB_P09','DATUMB_P10'],evidence='Printed list',
                 confidence=1.0 if self.calls==1 else 'high')),False,80
+    points,audit=local_matching._resolve_declared_marker_manifest_with_local_model(
+        Model(),1,methods,[],2,[])
+    assert points is not None and len(points)==2
+    assert audit['attempts'][0]['validation_errors']==['confidence_must_be_high_medium_or_low_string']
+    assert audit['attempts'][1]['valid']
