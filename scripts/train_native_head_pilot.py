@@ -1,242 +1,122 @@
-YªçŠx§¬uç%j·Â+ar‰ì¶ë•ë_¢ºŞjË"‚v›•ëÚ®&›•ëˆˆ“˜]]™Hİ˜]Hœ›Ş™[‹X˜XÚØ›Û™Hİ]]ZXY[İÈ˜]Ú[™ËYÜ›İ\[İ]İ^\È\İÛ›Kˆˆˆ‚š[\Ü\™Ü\œÙKœÛÛ‹Ş\Ë[YKİXİ\›X‹œ™\]Y\İ\ÚX‹Ú][ÜÂ™œ›ÛH]Xˆ[\Ü]š[\Ü[\H\Èœ”“ÓÕT]
-×Ùš[W×ÊKœ™\ÛÛ™J
-Kœ\™[ÖÌWBœŞ\Ëœ]š[œÙ\
-	ËÚÛYKØŞYËÔİ˜]KİÛÛÉÊB™œ›ÛHİ˜]WİÚÙ[š^™\ˆ[\ÜÚÙ[š^™\‚“ÕUT“ÓÕÉÜ™\ÜËÙ[™Ú[™Y\š[™ËXÚXÚÜËÌŒŒLL‹Û˜]]™KZXY\[İ	Â‘UOT“ÓÕÉÜ™\ÜËÙ[™Ú[™Y\š[™ËXÚXÚÜËÌŒŒLL‹Ø]]ÛX]XË\Ûİ\˜ÙKXİ\œšXİ[[IÂ•RS—ÔQÑTÏLÈTÕÔQÑTÏLÈÒÑS”×ÔT—ÔQÑOLÈĞTT‘WÓÑ‘”ÑULĞTT‘WÔ“ÓÕSÕUÉØØ\\™\ÉÂ™Yˆ™\]Y\İ
-›ÙJN‚ˆ™\O]\›X‹œ™\]Y\İ”™\]Y\İ
-	Ú‹ËÌLËŒŒŒNKİŒKØÚ]ØÛÛ\][ÛœÉË]OZœÛÛ‹™[\Ê›ÙJK™[˜ÛÙJ
-KXY\œÏ^ÉĞÛÛ[U\IÎ‰Ø\XØ][Û‹ÚœÛÛ‰ßJBˆ›Üˆ][\[ˆ˜[™ÙJLŒ
-N‚ˆN‚ˆÚ]\›X‹œ™\]Y\İ˜Z[ÛÜ[™\Š\›X‹œ™\]Y\İ”›ŞR[™\ŠßJJK›Ü[Š™\K[Y[İ]LÌ
-H\Èœ™]\›ˆœÛÛ‹›ØY
-ŠBˆ^Ù\\›X‹™\œ›Ü‹•T“\œ›Üˆ\È\œ‚ˆYˆ\Ú[œİ[˜ÙJ\œ‹\›X‹™\œ›Ü‹’\œ›ÜŠH[™\œ‹˜ÛÙH›İ[ˆ
-L‹LÊNœ˜Z\ÙBˆYˆ][\OLLNNœ˜Z\ÙBˆ[YKœÛY\
-ŠB™YˆÚÙ[š^™\Š
-N‚ˆT]
-ÜË™[š\›Û‹™Ù]
-	ÓÔPÓWÓUU‘WÕÒÑS’V‘T‰Ë	ËÚÛYKØŞYËÔİ˜]KY]KÜXÚÜËÚ\L—ŞËİÚÙ[š^™\‰ÊJNİZœÛÛ‹›ØYÊ
-Éİ›ØØX‹šœÛÛ‰ÊKœ™XYİ^
+"""Native Strata frozen-backbone output-head pilot; drawing-group heldout stays test only."""
+import argparse,json,sys,time,struct,urllib.request,hashlib,shutil,os
+from pathlib import Path
+import numpy as np
+ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,'/home/cyg/Strata/tools')
+from strata_tokenizer import Tokenizer
+OUT=ROOT/'reports/engineering-checks/20261012/native-head-pilot'
+DATA=ROOT/'reports/engineering-checks/20261012/automatic-source-curriculum'
+TRAIN_PAGES=2; TEST_PAGES=2; TOKENS_PER_PAGE=24; CAPTURE_OFFSET=0
+CAPTURE_ROOT=OUT/'captures'
+ENDPOINT=os.environ.get('ORACLE_NATIVE_HEAD_ENDPOINT','http://127.0.0.1:8081').rstrip('/')
+def request(body):
+ req=urllib.request.Request(ENDPOINT+'/v1/chat/completions',data=json.dumps(body).encode(),headers={'Content-Type':'application/json'})
+ for attempt in range(120):
+  try:
+   with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req,timeout=300) as r:return json.load(r)
+  except urllib.error.URLError as err:
+   if isinstance(err,urllib.error.HTTPError) and err.code not in (502,503):raise
+   if attempt==119:raise
+   time.sleep(2)
+def tokenizer():
+ p=Path(os.environ.get('ORACLE_NATIVE_TOKENIZER','/home/cyg/Strata-data/packs/iq2_xs/tokenizer'));v=json.loads((p/'vocab.json').read_text());tokens=['']*len(v)
+ for t,i in v.items():tokens[i]=t
+ return Tokenizer(tokens,(p/'merges.txt').read_text().split('\n'),json.loads((p/'token_type.json').read_text()))
+def examples():
+ rows={s:[json.loads(x) for x in (DATA/f'{s}.jsonl').read_text().splitlines()] for s in ('train','test')}
+ chosen=[]
+ for group in sorted({r['project_group'] for r in rows['train']}):
+  part=[r for r in rows['train'] if r['project_group']==group]
+  chosen += [('train',r) for r in (sorted(part,key=lambda x:len(str(x['answer'])))[:TRAIN_PAGES] if TRAIN_PAGES else sorted(part,key=lambda x:len(str(x['answer']))))]
+ chosen += [('test',r) for r in (sorted(rows['test'],key=lambda x:len(str(x['answer'])))[:TEST_PAGES] if TEST_PAGES else sorted(rows['test'],key=lambda x:len(str(x['answer']))))]
+ return chosen
+def collect():
+ tok=tokenizer();manifest=[];identifier=CAPTURE_OFFSET
+ selected_examples=examples()
+ for ex,(split,row) in enumerate(selected_examples):
+  answer=row['answer'] if isinstance(row['answer'],str) else json.dumps(row['answer'],ensure_ascii=False,separators=(',',':'))
+  ids=tok.encode(answer,parse_special=False)
+  # Complete source remains in context; pilot supervises at most 24 evenly spaced response positions.
+  # The server rejects oracle_teacher_tokens longer than 4096, so supervision stays within the first 4096 response tokens.
+  positions=np.unique(np.linspace(0,min(len(ids)-1,4095),min(TOKENS_PER_PAGE,len(ids)),dtype=int)).tolist()
+  for pos in positions:
+   path=OUT/'captures'/f'{identifier}.bin'
+   body={'model':os.environ.get('ORACLE_VIEWER_MODEL','qwen3.8-flash-next-iq2_xs'),'messages':[{'role':'system','content':'Extract only explicit source XYZ. Return JSON exactly, do not infer CAD.'},{'role':'user','content':row['question']+'\n'+row['context']}],'chat_template_kwargs':{'enable_thinking':False},'temperature':0,'max_tokens':1,'oracle_teacher_tokens':ids[:pos],'oracle_capture':identifier,'oracle_adapter':False}
+   signature=hashlib.sha256(json.dumps({k:v for k,v in body.items() if k!='oracle_adapter'},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+   receipt=path.with_suffix('.json')
+   reusable=path.exists() and receipt.exists() and json.loads(receipt.read_text()).get('request_sha256')==signature
+   if not reusable:
+    result=request(body)
+    native_path=CAPTURE_ROOT/f'{identifier}.bin'
+    if not native_path.exists():raise RuntimeError(f'capture absent: {identifier}: {result}')
+    if native_path.resolve()!=path.resolve():shutil.copyfile(native_path,path)
+    receipt.write_text(json.dumps({'request_sha256':signature,'capture_sha256':hashlib.sha256(path.read_bytes()).hexdigest()}))
+   manifest.append({'capture_id':identifier,'request_sha256':signature,'capture_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'split':split,'project_group':row['project_group'],'page':row['page'],'example':ex,'position':pos,'label':ids[pos],'source_context':row['context'],'source_answer':answer})
+   identifier+=1
+   if len(manifest)%24==0:
+    temp=OUT/'capture-manifest.json.tmp';temp.write_text(json.dumps(manifest,ensure_ascii=False,indent=2));temp.replace(OUT/'capture-manifest.json')
+   progress={'stage':'capture','samples_done':len(manifest),'example_done':ex+1,'examples_total':len(selected_examples),'split':split,'page':row['page']}
+   temp=OUT/'capture-progress.json.tmp';temp.write_text(json.dumps(progress));temp.replace(OUT/'capture-progress.json')
+   print(json.dumps({'stage':'capture','done':identifier,'split':split,'page':row['page']},ensure_ascii=False),flush=True)
+ temp=OUT/'capture-manifest.json.tmp';temp.write_text(json.dumps(manifest,ensure_ascii=False,indent=2));temp.replace(OUT/'capture-manifest.json')
+ return manifest
 
-JNİÚÙ[œÏVÉÉ×J›[ŠŠBˆ›ÜˆH[ˆ‹š][\Ê
-NÚÙ[œÖÚWO]ˆ™]\›ˆÚÙ[š^™\ŠÚÙ[œË
-ÉÛY\™Ù\Ë	ÊKœ™XYİ^
-
-KœÜ]
-	×‰ÊKœÛÛ‹›ØYÊ
-ÉİÚÙ[—İ\KšœÛÛ‰ÊKœ™XYİ^
-
-JJB™Yˆ^[\\Ê
-N‚ˆ›İÜÏ^ÜÎ–ÚœÛÛ‹›ØYÊ
-H›Üˆ[ˆ
-UKÙ‰ŞÜßKšœÛÛ›	ÊKœ™XYİ^
-
-KœÜ][™\Ê
-WH›ÜˆÈ[ˆ
-	İ˜Z[‰Ë	İ\İ	Ê_BˆÚÜÙ[V×Bˆ›ÜˆÜ›İ\[ˆÛÜY
-Ü–ÉÜ›Ú™XİÙÜ›İ\	×H›Üˆˆ[ˆ›İÜÖÉİ˜Z[‰×_JN‚ˆ\VÜˆ›Üˆˆ[ˆ›İÜÖÉİ˜Z[‰×HYˆ–ÉÜ›Ú™XİÙÜ›İ\	×OOYÜ›İ\BˆÚÜÙ[ˆ
-ÏHÊ	İ˜Z[‰ËŠH›Üˆˆ[ˆ
-ÛÜY
-\Ù^O[[X™H›[ŠİŠÉØ[œİÙ\‰×JJJVÎ•RS—ÔQÑT×HYˆRS—ÔQÑTÈ[ÙHÛÜY
-\Ù^O[[X™H›[ŠİŠÉØ[œİÙ\‰×JJJJWBˆÚÜÙ[ˆ
-ÏHÊ	İ\İ	ËŠH›Üˆˆ[ˆ
-ÛÜY
-›İÜÖÉİ\İ	×KÙ^O[[X™H›[ŠİŠÉØ[œİÙ\‰×JJJVÎ•TÕÔQÑT×HYˆTÕÔQÑTÈ[ÙHÛÜY
-›İÜÖÉİ\İ	×KÙ^O[[X™H›[ŠİŠÉØ[œİÙ\‰×JJJJWBˆ™]\›ˆÚÜÙ[‚™YˆÛÛXİ
-
-N‚ˆÚÏ]ÚÙ[š^™\Š
-NÛX[šY™\İV×NÚY[YšY\PĞTT‘WÓÑ‘”ÑUˆÙ[XİYÙ^[\\ÏY^[\\Ê
-Bˆ›Üˆ^
-Ü]›İÊH[ˆ[[Y\˜]JÙ[XİYÙ^[\\ÊN‚ˆ[œİÙ\\›İÖÉØ[œİÙ\‰×HYˆ\Ú[œİ[˜ÙJ›İÖÉØ[œİÙ\‰×KİŠH[ÙHœÛÛ‹™[\Ê›İÖÉØ[œİÙ\‰×K[œİ\™WØ\ØÚZOQ˜[ÙKÙ\\˜]ÜœÏJ	Ë	Ë	Î‰ÊJBˆYÏ]ÚË™[˜ÛÙJ[œİÙ\‹\œÙWÜÜXÚX[Q˜[ÙJBˆÈÛÛ\]HÛİ\˜ÙH™[XZ[œÈ[ˆÛÛ^È[İİ\\š\Ù\È][Üİ]™[›HÜXÙY™\ÜÛœÙHÜÚ][ÛœË‚ˆÜÚ][ÛœÏ[œ[š\]YJœ›[œÜXÙJ[ŠYÊKLKZ[ŠÒÑS”×ÔT—ÔQÑK[ŠYÊJK\OZ[
-JKÛ\İ
-
-Bˆ›ÜˆÜÈ[ˆÜÚ][ÛœÎ‚ˆ]SÕUÉØØ\\™\ÉËÙ‰ŞÚY[YšY\ŸK˜š[‰Âˆ›ÙO^ÉÛ[Ù[	Î›ÜË™[š\›Û‹™Ù]
-	ÓÔPÓWÕ’QUÑT—ÓSÑS	Ë	Ü]Ù[ŒËY›\Ú[™^Z\L—ŞÉÊK	ÛY\ÜØYÙ\ÉÎ–ŞÉÜ›ÛIÎ‰ÜŞ\İ[IË	ØÛÛ[	Î‰Ñ^˜XİÛ›H^XÚ]Ûİ\˜ÙHV‹ˆ™]\›ˆ”ÓÓˆ^XİKÈ›İ[™™\ˆĞQ‰ßKÉÜ›ÛIÎ‰İ\Ù\‰Ë	ØÛÛ[	Îœ›İÖÉÜ]Y\İ[Û‰×JÉ×‰ÊÜ›İÖÉØÛÛ^	×_WK	ØÚ]İ[\]WÚİØ\™ÜÉÎÉÙ[˜X›Wİ[šÚ[™ÉÎ‘˜[Ù_K	İ[\\˜]\™IÎŒ	ÛX^İÚÙ[œÉÎŒK	ÛÜ˜XÛWİXXÚ\—İÚÙ[œÉÎšYÖÎœÜ×K	ÛÜ˜XÛWØØ\\™IÎšY[YšY\‹	ÛÜ˜XÛWØY\\‰Î‘˜[Ù_BˆÚYÛ˜]\™OZ\ÚX‹œÚLMŠœÛÛ‹™[\ÊÚÎˆ›ÜˆËˆ[ˆ›ÙKš][\Ê
-HYˆÈOIÛÜ˜XÛWØY\\‰ßKÛÜÚÙ^\ÏUYK[œİ\™WØ\ØÚZOQ˜[ÙJK™[˜ÛÙJ
-JKš^YÙ\İ
-
-Bˆ™XÙZ\\]Ú]ÜİY™š^
-	ËšœÛÛ‰ÊBˆ™]\ØX›O\]™^\İÊ
-H[™™XÙZ\™^\İÊ
-H[™œÛÛ‹›ØYÊ™XÙZ\œ™XYİ^
-
-JK™Ù]
-	Ü™\]Y\İÜÚLM‰ÊOO\ÚYÛ˜]\™BˆYˆ›İ™]\ØX›N‚ˆ™\İ[\™\]Y\İ
-›ÙJBˆ˜]]™WÜ]PĞTT‘WÔ“ÓÕÙ‰ŞÚY[YšY\ŸK˜š[‰ÂˆYˆ›İ˜]]™WÜ]™^\İÊ
-Nœ˜Z\ÙH[[YQ\œ›ÜŠ‰ØØ\\™HXœÙ[ˆÚY[YšY\ŸNˆÜ™\İ[IÊBˆYˆ˜]]™WÜ]œ™\ÛÛ™J
-HO\]œ™\ÛÛ™J
-NœÚ][˜ÛÜYš[J˜]]™WÜ]]
-Bˆ™XÙZ\Üš]Wİ^
-œÛÛ‹™[\ÊÉÜ™\]Y\İÜÚLM‰ÎœÚYÛ˜]\™K	ØØ\\™WÜÚLM‰Îš\ÚX‹œÚLMŠ]œ™XYØ]\Ê
-JKš^YÙ\İ
-
-_JJBˆX[šY™\İ˜\[™
-ÉØØ\\™WÚY	ÎšY[YšY\‹	Ü™\]Y\İÜÚLM‰ÎœÚYÛ˜]\™K	ØØ\\™WÜÚLM‰Îš\ÚX‹œÚLMŠ]œ™XYØ]\Ê
-JKš^YÙ\İ
-
-K	ÜÜ]	ÎœÜ]	Ü›Ú™XİÙÜ›İ\	Îœ›İÖÉÜ›Ú™XİÙÜ›İ\	×K	ÜYÙIÎœ›İÖÉÜYÙI×K	Ù^[\IÎ™^	ÜÜÚ][Û‰ÎœÜË	ÛX™[	ÎšYÖÜÜ×K	ÜÛİ\˜ÙWØÛÛ^	Îœ›İÖÉØÛÛ^	×K	ÜÛİ\˜ÙWØ[œİÙ\‰Î˜[œİÙ\ŸJBˆY[YšY\ŠÏLBˆYˆ[ŠX[šY™\İ
-ILOL‚ˆ[\SÕUÉØØ\\™K[X[šY™\İšœÛÛ‹\	Îİ[\Üš]Wİ^
-œÛÛ‹™[\ÊX[šY™\İ[œİ\™WØ\ØÚZOQ˜[ÙK[™[LŠJNİ[\œ™\XÙJÕUÉØØ\\™K[X[šY™\İšœÛÛ‰ÊBˆ›ÙÜ™\ÜÏ^ÉÜİYÙIÎ‰ØØ\\™IË	ÜØ[\\×ÙÛ™IÎ›[ŠX[šY™\İ
-K	Ù^[\WÙÛ™IÎ™^
-ÌK	Ù^[\\×İİ[	Î›[ŠÙ[XİYÙ^[\\ÊK	ÜÜ]	ÎœÜ]	ÜYÙIÎœ›İÖÉÜYÙI×_Bˆ[\SÕUÉØØ\\™K\›ÙÜ™\ÜËšœÛÛ‹\	Îİ[\Üš]Wİ^
-œÛÛ‹™[\Ê›ÙÜ™\ÜÊJNİ[\œ™\XÙJÕUÉØØ\\™K\›ÙÜ™\ÜËšœÛÛ‰ÊBˆš[
-œÛÛ‹™[\ÊÉÜİYÙIÎ‰ØØ\\™IË	ÙÛ™IÎšY[YšY\‹	ÜÜ]	ÎœÜ]	ÜYÙIÎœ›İÖÉÜYÙI×_K[œİ\™WØ\ØÚZOQ˜[ÙJK›\ÚUYJBˆ[\SÕUÉØØ\\™K[X[šY™\İšœÛÛ‹\	Îİ[\Üš]Wİ^
-œÛÛ‹™[\ÊX[šY™\İ[œİ\™WØ\ØÚZOQ˜[ÙK[™[LŠJNİ[\œ™\XÙJÕUÉØØ\\™K[X[šY™\İšœÛÛ‰ÊBˆ™]\›ˆX[šY™\İ™Yˆ˜Z[Š
-N‚ˆÜË™[š\›Û–ÈÕQWÕ’TÒP“WÑU’PÑTÈ—OHˆˆÈÔHY\\ˆ˜Z[š[™È]\İ›İ[š]X[^™HHØØİ\YY[™™\™[˜ÙHÔK‚ˆ[\ÜÜ˜ÚˆÜ˜ÚœÙ]Û[Wİ™XYÊ
-NİÜ˜Ú›X[X[ÜÙYY
-ŒLÌMŒÍŠBˆX[šY™\İZœÛÛ‹›ØYÊ
-ÕUÉØØ\\™K[X[šY™\İšœÛÛ‰ÊKœ™XYİ^
-
-JBˆX™[Ï[œ˜\œ˜^JÜ–ÉÛX™[	×H›Üˆˆ[ˆX[šY™\İJNİ[œ˜\œ˜^JÜ–ÉÜÜ]	×OOIİ˜Z[‰È›Üˆˆ[ˆX[šY™\İJNİO_‚ˆ\ÜÙ\‹˜[J
-H[™K˜[J
-Bˆ\ÜÙ\Ù]
-–ÉÜ›Ú™XİÙÜ›İ\	×H›Üˆˆ[ˆX[šY™\İYˆ–ÉÜÜ]	×OOIİ˜Z[‰ÊKš\Ù\Ú›Ú[
-–ÉÜ›Ú™XİÙÜ›İ\	×H›Üˆˆ[ˆX[šY™\İYˆ–ÉÜÜ]	×OOIİ\İ	ÊBˆYˆ™XY
-›İÊN‚ˆJÕUÉØØ\\™\ÉËÙˆÜ›İÖÉØØ\\™WÚY	×_K˜š[ˆŠKœ™XYØ]\Ê
-BˆYˆ›İË™Ù]
-	ØØ\\™WÜÚLM‰ÊN˜\ÜÙ\\ÚX‹œÚLMŠŠKš^YÙ\İ
-
-OO\›İÖÉØØ\\™WÜÚLM‰×K	ĞØ\\™HÚ[™ÙYÚ[˜ÙHÛÛXİ[Û‰ÂˆXYÚXËÚY›ØØX\İXİ[œXÚÊ	ÏRRIË–ÎŒL—JNØ\ÜÙ\XYÚXÏOLÌMÍˆ[™[ŠŠOOLLŠÍ
-ŠÚY
-İ›ØØXŠBˆ\œ[œ™œ›ÛXY™™\Š–ÌL—K\OIÏ	ÊNØ\ÜÙ\œš\Ùš[š]J\œŠK˜[
-
-Bˆ™]\›ˆÚY›ØØX‹\œ–ÎÚYK\œ–İÚY—BˆÙ[XİY\Ù]
-[
-
-H›Üˆ[ˆX™[Öİ—JBˆ›Üˆ›İÈ[ˆX[šY™\İ‚ˆYˆ›İÖÉÜÜ]	×OOIİ˜Z[‰Î‚ˆÚY›ØØX‹ËÙÚ]Ï\™XY
-›İÊNÜÙ[XİY\]J[
-
-H›Üˆ[ˆœ˜\™Ü\][ÛŠÙÚ]ËN
-VËN—JBˆİXœÙ][œ˜\œ˜^JÛÜY
-Ù[XİY
-K\O[œZ[ÌŠNØ\ÜÙ\[ŠİXœÙ]
-OMM‚ˆX\ÚÏ[œ›Û™\Ê›ØØX‹›ÛÛ
-NÛX\ÚÖÜİXœÙ]OQ˜[ÙBˆ™X]\™\ÏV×NÜİXœØÛÜ™\ÏV×NÜ\][ÛœÏV×Nİ\™Ù]ÏV×NÛİ]ÚYWØ™\İV×NÛİ]ÚYWÚYÏV×NØ˜\Ù[[™WİÚÙ[œÏV×Bˆ›Üˆ›İÈ[ˆX[šY™\İ‚ˆË˜ËÙÚ]Ï\™XY
-›İÊNØ\ÜÙ\ÏO]ÚY[™˜ÏO]›ØØX‚ˆİ\[ÙÚ]ÖÛX\Ú×NÜXZÏY›Ø]
-İ\‹›X^
-
-JNÜ\][ÛœË˜\[™
-XZÊÙ›Ø]
-œ›ÙÊœ™^
-İ\‹\XZÊKœİ[J
-JJJBˆ™X]\™\Ë˜\[™
-
-NÜİXœØÛÜ™\Ë˜\[™
-ÙÚ]ÖÜİXœÙ]JNİ\™Ù]Ë˜\[™
-ÙÚ]ÖÜ›İÖÉÛX™[	×WJNØ˜\Ù[[™WİÚÙ[œË˜\[™
-[
-ÙÚ]Ë˜\™ÛX^
-
-JJBˆİ]ÚYWØ™\İ˜\[™
-XZÊNÛİ]ÚYWÚYË˜\[™
-[
-œ™›]›Û™\›ÊX\ÚÊVÛİ\‹˜\™ÛX^
-
-WJJBˆ[œœİXÚÊ™X]\™\ÊNÛYX[^İ—K›YX[Š
-NÜØØ[O[œ›X^[][Jİ—Kœİ
-
-KŒJBˆ]Ü˜Ú[œÛÜŠ
-[YX[ŠKÜØØ[JNØ]Ü˜Ú[œÛÜŠœœİXÚÊİXœØÛÜ™\ÊJNÛİ]ÚYO]Ü˜Ú[œÛÜŠ\][ÛœË\O]Ü˜Ú™›Ø]ÌŠBˆ\™Ù]Ø˜\ÙO]Ü˜Ú[œÛÜŠ\™Ù]Ë\O]Ü˜Ú™›Ø]ÌŠBˆX\Y^Ú[
-
-NšH›ÜˆK[ˆ[[Y\˜]JİXœÙ]
-_Bˆ\™Ù]Ú[™^]Ü˜Ú[œÛÜŠÛX\Y™Ù]
-[
-
-KLJH›Üˆ[ˆX™[×JBˆ˜[šÏNİO]Ü˜Ú››‹”\˜[Y]\ŠÜ˜Úœ˜[™ŠÚY˜[šÊJŒŒJNİ]Ü˜Ú››‹”\˜[Y]\ŠÜ˜Ú™\›ÜÊ[ŠİXœÙ]
-K˜[šÊJNØšX\Ï]Ü˜Ú››‹”\˜[Y]\ŠÜ˜Ú™\›ÜÊ[ŠİXœÙ]
-JJBˆÜ[O]Ü˜Ú›Ü[KY[UÊİK‹šX\×KKŒËÙZYÚÙXØ^OKŒJBˆYˆØÛÜ™\Ê
-Nœ™]\›ˆ
-İÜ˜Ú˜Û[\
-P‹•
-ØšX\ËL‹ŠBˆYˆÜÜÊY\YÙ[
-N‚ˆ]Ü˜Ú›ÙØY^
-Ü˜Ú›ÙÜİ[Y^
-Y\YJKİ]ÚYJBˆ\™Ù]]Ü˜ÚÚ\™J\™Ù]Ú[™^LY\YİÜ˜Ú˜\˜[™ÙJ[ŠX™[ÊJK\™Ù]Ú[™^˜Û[\
-Z[L
-WK\™Ù]Ø˜\ÙJBˆ™]\›ˆ
-‹]\™Ù]
-VÜÙ[K›YX[Š
-Bˆ[š]X[Y›Ø]
-ÜÜÊŠJNÚ\İÜOV×Bˆ›Üˆİ\[ˆ˜[™ÙJLŒ
-N‚ˆÜ[K™\›×ÙÜ˜Y
-
-NÛ[ÜÜÊØÛÜ™\Ê
-KŠNÛ˜˜XÚİØ\™
-
-NİÜ˜Ú››‹][Ë˜Û\ÙÜ˜YÛ›Ü›WÊİK‹šX\×KJNÛÜ[Kœİ\
-
-BˆYˆİ\	LŒOLš\İÜK˜\[™
-ÉÜİ\	Îœİ\	İ˜Z[—Û›	Î™›Ø]
-™]XÚ
-
-J_JBˆY\Y\ØÛÜ™\Ê
-K™]XÚ
-
-K›[\J
-NİÚ[›š[™ÏXY\Y˜\™ÛX^
-JNØ™\İXY\YÛœ˜\˜[™ÙJ[ŠX™[ÊJKÚ[›š[™×NØÚ[™ÙYİÚÙ[œÏ[œÚ\™J™\İ›œ˜\œ˜^Jİ]ÚYWØ™\İ
-KİXœÙ]İÚ[›š[™×Kİ]ÚYWÚYÊNØ˜\Ù[[™WİÚÙ[œÏ[œ˜\œ˜^J˜\Ù[[™WİÚÙ[œÊBˆ™\Ü^ÉÛY]Ù	Î‰Ùœ›Ş™[—Û˜]]™WØ˜XÚØ›Û™WÛİ×Ü˜[š×Ûİ]]ÚXY	Ë	Ø˜\ÙWİÙZYÚ×ØÚ[™ÙY	Î‘˜[ÙK	ØY\\—İ˜Z[™Y	Î•YK	Üİ\ÉÎŒLŒ	İ˜Z[—ÜØ[\\ÉÎš[
-‹œİ[J
-JK	İ\İÜØ[\\ÉÎš[
-Kœİ[J
-JK	Ü\˜[Y]\œÉÎK›[Y[
-
-Jİ‹›[Y[
-
-JØšX\Ë›[Y[
-
-K	ÜİXœÙ]İÚÙ[œÉÎ›[ŠİXœÙ]
-K	Ü˜[šÉÎœ˜[šË	ØÛ\ÛÙÚ]ÉÎŒ‹	İ˜Z[—Û›Ø™Y›Ü™IÎš[š]X[	İ˜Z[—Û›ØY\‰Î™›Ø]
-ÜÜÊØÛÜ™\Ê
-KŠK™]XÚ
-
-JK	İ\İÛ›Ø™Y›Ü™IÎ™›Ø]
-ÜÜÊJJK	İ\İÛ›ØY\‰Î™›Ø]
-ÜÜÊØÛÜ™\Ê
-KJK™]XÚ
-
-JK	İ˜Z[—İÜWØ™Y›Ü™IÎ™›Ø]
-
-˜\Ù[[™WİÚÙ[œÖİ—OO[X™[Öİ—JK›YX[Š
-JK	İ˜Z[—İÜWØY\‰Î™›Ø]
-
-Ú[™ÙYİÚÙ[œÖİ—OO[X™[Öİ—JK›YX[Š
-JK	İ\İİÜWØ™Y›Ü™IÎ™›Ø]
-
-˜\Ù[[™WİÚÙ[œÖİWOO[X™[ÖİWJK›YX[Š
-JK	İ\İİÜWØY\‰Î™›Ø]
-
-Ú[™ÙYİÚÙ[œÖİWOO[X™[ÖİWJK›YX[Š
-JK	Ú\İÜIÎš\İÜK	Ù\ŞYY	Î‘˜[ÙK	Û[Z]][Û‰Î‰ÕXXÚ\‹Y›Ü˜ÙYÚÙ[ˆ[İÈ›İ[™]ËY[™RHÙ[ÛY]HÜˆ[X[œİÙ\ˆ™[˜ÚX\šË‰ßBˆÚ]
-ÕUÉØY\\‹›ÚIÊK›Ü[Š	İØ‰ÊH\È‚ˆ‹Üš]JİXİœXÚÊ	ÏRRRRY‰ËÌMM‹ÚY˜[šË[ŠİXœÙ]
-K›ØØX‹ŠJBˆ›Üˆ\œˆ[ˆÜİXœÙ]YX[‹ØØ[KK™]XÚ
-
-K›[\J
-K‹™]XÚ
-
-K›[\J
-KšX\Ë™]XÚ
-
-K›[\J
-WN™‹Üš]J\œ‹˜\İ\J	ÏM	ÈYˆ\œ‹™\OO[œZ[Ìˆ[ÙH	Ï	ÊKØ]\Ê
-JBˆ
-ÕUÉİ˜Z[š[™Ë\™\ÜšœÛÛ‰ÊKÜš]Wİ^
-œÛÛ‹™[\Ê™\Ü[™[LŠJNÜš[
-œÛÛ‹™[\Ê™\Ü[™[LŠJBšYˆ×Û˜[YW×ÏOI××ÛXZ[—×ÉÎ‚ˆX\™Ü\œÙK\™İ[Y[\œÙ\Š
-NÜ˜YØ\™İ[Y[
-	ËK\İYÙIËÚÚXÙ\ÏVÉØÛÛXİ	Ë	İ˜Z[‰Ë	Ø[	×KY˜][IØ[	ÊBˆ˜YØ\™İ[Y[
-	ËK[İ]]	Ë\OT]Y˜][SÕU
-NÜ˜YØ\™İ[Y[
-	ËKY]\Ù]	Ë\OT]Y˜][QUJBˆ˜YØ\™İ[Y[
-	ËK]˜Z[‹\YÙ\Ë\\‹\›Ú™Xİ	Ë\OZ[Y˜][LŠNÜ˜YØ\™İ[Y[
-	ËK]\İ\YÙ\ÉË\OZ[Y˜][LŠNÜ˜YØ\™İ[Y[
-	ËK]ÚÙ[œË\\‹\YÙIË\OZ[Y˜][L
-Bˆ˜YØ\™İ[Y[
-	ËKXØ\\™K\›Ûİ	Ë\OT]Y˜][PĞTT‘WÔ“ÓÕ
-NÜ˜YØ\™İ[Y[
-	ËKXØ\\™K[Ù™œÙ]	Ë\OZ[Y˜][L
-BˆO\œ\œÙWØ\™ÜÊ
-NÓÕUXK›İ]]ÑUOXK™]\Ù]ÕRS—ÔQÑTÏXK˜Z[—ÜYÙ\×Ü\—Ü›Ú™XİÕTÕÔQÑTÏXK\İÜYÙ\ÎÕÒÑS”×ÔT—ÔQÑOXKÚÙ[œ×Ü\—ÜYÙNĞĞTT‘WÔ“ÓÕXK˜Ø\\™WÜ›ÛİĞĞTT‘WÓÑ‘”ÑUXK˜Ø\\™WÛÙ™œÙ]ˆYˆZ[ŠRS—ÔQÑTËTÕÔQÑTËĞTT‘WÓÑ‘”ÑU
-OÜˆ›İOUÒÑS”×ÔT—ÔQÑOLMœ™\œ›ÜŠ	Ò[˜[YØ[\[™ÈÛÛ›ÛÉÊBˆÕU›ZÙ\Š\™[ÏUYK^\İÛÚÏUYJNÊÕUÉØØ\\™\ÉÊK›ZÙ\Š^\İÛÚÏUYJBˆYˆKœİYÙH[ˆ
-	ØÛÛXİ	Ë	Ø[	ÊN˜ÛÛXİ
-
-BˆYˆKœİYÙH[ˆ
-	İ˜Z[‰Ë	Ø[	ÊN˜Z[Š
-B
+def train():
+ os.environ["CUDA_VISIBLE_DEVICES"]=""  # CPU adapter training must not initialize the occupied inference GPU.
+ import torch
+ torch.set_num_threads(4);torch.manual_seed(61316076)
+ manifest=json.loads((OUT/'capture-manifest.json').read_text())
+ labels=np.array([r['label'] for r in manifest]);tr=np.array([r['split']=='train' for r in manifest]);te=~tr
+ assert tr.any() and te.any()
+ assert set(r['project_group'] for r in manifest if r['split']=='train').isdisjoint(r['project_group'] for r in manifest if r['split']=='test')
+ def read(row):
+  b=(OUT/'captures'/f"{row['capture_id']}.bin").read_bytes()
+  if row.get('capture_sha256'):assert hashlib.sha256(b).hexdigest()==row['capture_sha256'], 'Capture changed since collection'
+  magic,width,vocab=struct.unpack('<III',b[:12]);assert magic==0x3143464f and len(b)==12+4*(width+vocab)
+  arr=np.frombuffer(b[12:],dtype='<f4');assert np.isfinite(arr).all()
+  return width,vocab,arr[:width],arr[width:]
+ selected=set(int(t) for t in labels[tr])
+ for row in manifest:
+  if row['split']=='train':
+   width,vocab,_,logits=read(row);selected.update(int(t) for t in np.argpartition(logits,-8)[-8:])
+ subset=np.array(sorted(selected),dtype=np.uint32);assert len(subset)<=4096
+ mask=np.ones(vocab,bool);mask[subset]=False
+ features=[];subscores=[];partitions=[];targets=[];outside_best=[];outside_ids=[];baseline_tokens=[]
+ for row in manifest:
+  w,vc,x,logits=read(row);assert w==width and vc==vocab
+  other=logits[mask];peak=float(other.max());partitions.append(peak+float(np.log(np.exp(other-peak).sum())))
+  features.append(x);subscores.append(logits[subset]);targets.append(logits[row['label']]);baseline_tokens.append(int(logits.argmax()))
+  outside_best.append(peak);outside_ids.append(int(np.flatnonzero(mask)[other.argmax()]))
+ x=np.stack(features);mean=x[tr].mean(0);scale=np.maximum(x[tr].std(0),0.05)
+ xt=torch.tensor((x-mean)/scale);bt=torch.tensor(np.stack(subscores));outside=torch.tensor(partitions,dtype=torch.float32)
+ target_base=torch.tensor(targets,dtype=torch.float32)
+ mapped={int(t):i for i,t in enumerate(subset)}
+ target_index=torch.tensor([mapped.get(int(t),-1) for t in labels])
+ rank=8;u=torch.nn.Parameter(torch.randn(width,rank)*0.001);v=torch.nn.Parameter(torch.zeros(len(subset),rank));bias=torch.nn.Parameter(torch.zeros(len(subset)))
+ optim=torch.optim.AdamW([u,v,bias],lr=.003,weight_decay=.01)
+ def scores():return bt+torch.clamp(xt@u@v.T+bias,-2,2)
+ def loss(adapted,sel):
+  z=torch.logaddexp(torch.logsumexp(adapted,1),outside)
+  target=torch.where(target_index>=0,adapted[torch.arange(len(labels)),target_index.clamp(min=0)],target_base)
+  return (z-target)[sel].mean()
+ initial=float(loss(bt,tr));history=[]
+ for step in range(120):
+  optim.zero_grad();l=loss(scores(),tr);l.backward();torch.nn.utils.clip_grad_norm_([u,v,bias],1);optim.step()
+  if step%20==0:history.append({'step':step,'train_nll':float(l.detach())})
+ adapted=scores().detach().numpy();winning=adapted.argmax(1);best=adapted[np.arange(len(labels)),winning];changed_tokens=np.where(best>np.array(outside_best),subset[winning],outside_ids);baseline_tokens=np.array(baseline_tokens)
+ report={'method':'frozen_native_backbone_low_rank_output_head','base_weights_changed':False,'adapter_trained':True,'steps':120,'train_samples':int(tr.sum()),'test_samples':int(te.sum()),'parameters':u.numel()+v.numel()+bias.numel(),'subset_tokens':len(subset),'rank':rank,'clip_logits':2,'train_nll_before':initial,'train_nll_after':float(loss(scores(),tr).detach()),'test_nll_before':float(loss(bt,te)),'test_nll_after':float(loss(scores(),te).detach()),'train_top1_before':float((baseline_tokens[tr]==labels[tr]).mean()),'train_top1_after':float((changed_tokens[tr]==labels[tr]).mean()),'test_top1_before':float((baseline_tokens[te]==labels[te]).mean()),'test_top1_after':float((changed_tokens[te]==labels[te]).mean()),'history':history,'deployed':False,'limitation':'Teacher-forced token pilot; not end-to-end FAI geometry or full-answer benchmark.'}
+ with (OUT/'adapter.oha').open('wb') as f:
+  f.write(struct.pack('<IIIIIf',0x3141484f,width,rank,len(subset),vocab,2))
+  for arr in [subset,mean,scale,u.detach().numpy(),v.detach().numpy(),bias.detach().numpy()]:f.write(arr.astype('<u4' if arr.dtype==np.uint32 else '<f4').tobytes())
+ (OUT/'training-report.json').write_text(json.dumps(report,indent=2));print(json.dumps(report,indent=2))
+if __name__=='__main__':
+ p=argparse.ArgumentParser();p.add_argument('--stage',choices=['collect','train','all'],default='all')
+ p.add_argument('--output',type=Path,default=OUT);p.add_argument('--dataset',type=Path,default=DATA)
+ p.add_argument('--train-pages-per-project',type=int,default=2);p.add_argument('--test-pages',type=int,default=2);p.add_argument('--tokens-per-page',type=int,default=24)
+ p.add_argument('--capture-root',type=Path,default=CAPTURE_ROOT);p.add_argument('--capture-offset',type=int,default=0)
+ a=p.parse_args();OUT=a.output;DATA=a.dataset;TRAIN_PAGES=a.train_pages_per_project;TEST_PAGES=a.test_pages;TOKENS_PER_PAGE=a.tokens_per_page;CAPTURE_ROOT=a.capture_root;CAPTURE_OFFSET=a.capture_offset
+ if min(TRAIN_PAGES,TEST_PAGES,CAPTURE_OFFSET)<0 or not 1<=TOKENS_PER_PAGE<=256:p.error('Invalid sampling controls')
+ OUT.mkdir(parents=True,exist_ok=True);(OUT/'captures').mkdir(exist_ok=True)
+ if a.stage in ('collect','all'):collect()
+ if a.stage in ('train','all'):train()
