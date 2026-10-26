@@ -747,7 +747,9 @@ def build_candidates(store, project_id, *, registration_path=None, persist=False
                               frame_hypotheses=list(frame_evidence.values()),point_correspondences=projected)
                 note=f'自动 XYZ 显示候选；全组点位及变换后的原文等 Z 截面均保留。CAD 锚点可在 {MAX_DISPLAY_SECTION_DEVIATION_MM:.2f} mm 显示限值内贴近截面；每点记录截面偏离量。尚未完成坐标系及计量验证。\n'+json.dumps(evidence,ensure_ascii=False,separators=(',',':'))
                 candidate=dict(fai=item['number'],anchors=anchors,note=note,evidence=evidence,
-                               candidate_kind='xyz_display',
+                               candidate_kind='xyz_display',known_source_points=rows,
+                               required_marker_count=required_marker_count,
+                               required_marker_groups=required_marker_groups,
                                max_point_residual_mm=max(r['residual_mm'] for r in projected))
                 candidates.append(candidate)
                 if persist:

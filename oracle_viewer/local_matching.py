@@ -58,6 +58,52 @@ def _complete_visual_context_budget(messages,*,limit=58000):
     return total+512
 
 
+def _compact_visual_evidence_message(message,*,fai,source_points,source_pages,
+        required_marker_groups=(),surface_candidates=(),mode='markers',failure_summary=None):
+    """Shorten redundant instructions while preserving every source attachment.
+
+    Large MSOP point tables and source pages stay byte-for-byte intact in the
+    attachment. This only replaces repeated prompt prose / previous model
+    output when a retry would exceed the local request budget.
+    """
+    point_names=[point.get('name') for point in source_points if point.get('name')]
+    pages=sorted({page for page in source_pages if type(page) is int})
+    groups=[{key:group[key] for key in ('group_id','declared_count','source_point_names',
+        'measured_features','source_page') if key in group}
+        for group in required_marker_groups if isinstance(group,dict)]
+    compact_candidates=[]
+    for candidate in surface_candidates:
+        row={key:candidate[key] for key in ('id','view_id','uv','feature','source_point_names',
+            'candidate_role','candidate_roles','blocked_view_ids_by_source_name') if key in candidate}
+        if row:
+            compact_candidates.append(row)
+    if mode=='frame_candidate':
+        instruction=(
+            'This is automatic FAI placement by the local vision model. Use all unmodified source pages and XYZ rows in the attached evidence. '
+            'Select only a geometry-valid candidate_id whose complete point group matches the MSOP feature and drawing view. '
+            'Do not accept by geometry alone; preserve source point count and coordinate choices. Output one compact JSON object with decision, fai, '
+            'source_point_count, candidate_id, evidence, confidence, source_pages, and exact coordinate_choices if needed. ')
+    else:
+        instruction=(
+            'This is automatic FAI placement by the local vision model. Use all unmodified MSOP, drawing, and CAD evidence in the attachments. '
+            'Return a complete marker for every listed direct source point exactly once; preserve each required measurement group and point name. '
+            'Use distinct CAD intersections. A source point/view pair listed as blocked must use another orthographic view; geometry, rigid-fit, '
+            'ray-hit, source-page, and entity checks remain mandatory. Output compact JSON with decision, fai, markers, registration_points, '
+            'evidence, confidence, source_pages, and exact coordinate_choices if needed. ')
+    content=(VIEWER_LOCATION_TASK+instruction+f' FAI {fai}; source point count {len(point_names)}; '
+        f'exact source point names {json.dumps(point_names,ensure_ascii=False,separators=(",",":"))}; '
+        f'MSOP pages {json.dumps(pages,separators=(",",":"))}; '
+        f'required measurement groups {json.dumps(groups,ensure_ascii=False,separators=(",",":"))}.')
+    if failure_summary:
+        content+=' Repair diagnostics: '+json.dumps(failure_summary,ensure_ascii=False,separators=(',',':'))+'.'
+    if compact_candidates:
+        content+=' Exact CAD ray-hit candidates and per-source blocked views: '+json.dumps(
+            compact_candidates,ensure_ascii=False,separators=(',',':'))+'.'
+    result={**message,'content':content}
+    result['attachments']=[dict(attachment) for attachment in message.get('attachments',[])]
+    return result
+
+
 def _rigid_correspondence(source_xyz, cad_xyz, *, max_residual_mm=0.75):
     """Fit one proper rigid source-to-CAD transform and reject weak point groups."""
     source=np.asarray(source_xyz,dtype=float);target=np.asarray(cad_xyz,dtype=float)
@@ -258,6 +304,25 @@ def _collapsed_source_marker_groups(markers,resolved_sources):
     return collapsed
 
 
+def _blocked_views_from_geometry_diagnostic(diagnostic):
+    """Return source-point views that cannot separate a collapsed XYZ group."""
+    if not isinstance(diagnostic,dict) or diagnostic.get('reason')!='distinct_source_points_collapsed_to_same_view_uv':
+        return {}
+    blocked={}
+    top_view=diagnostic.get('view_id')
+    for name in diagnostic.get('source_point_names') or []:
+        if isinstance(name,str) and top_view:
+            blocked.setdefault(name,set()).add(top_view)
+    for row in diagnostic.get('missed_marker_points') or []:
+        if not isinstance(row,dict):
+            continue
+        view=row.get('view_id') or top_view
+        for name in row.get('source_point_names') or []:
+            if isinstance(name,str) and view:
+                blocked.setdefault(name,set()).add(view)
+    return blocked
+
+
 def _rigid_source_anchors(mesh, source_xyz, correspondence_xyz, *, max_fit_residual_mm=0.75,
                           max_surface_residual_mm=0.35):
     """Place a complete MSOP point group through one transform, preserving its geometry."""
@@ -415,15 +480,19 @@ def _surface_candidate_selection_audit(parsed, surface_candidates,*,require_mark
     if not surface_candidates:
         return []
     candidate_sources={}
+    candidates_by_id={}
     valid_ids=set()
     for candidate in surface_candidates:
         if not isinstance(candidate,dict) or candidate.get('id') is None:
             continue
         key=str(candidate['id']).strip().upper().removeprefix('C')
         valid_ids.add(key)
+        candidates_by_id[key]=candidate
         for name in candidate.get('source_point_names') or []:
             candidate_sources.setdefault(name,set()).add(key)
     issues=[]
+    required_names=(set(require_marker_ids) if isinstance(require_marker_ids,(set,list,tuple,frozenset))
+                    else set())
     selected_marker_ids=set()
     for field in ('markers','registration_points'):
         rows=parsed.get(field)
@@ -434,21 +503,40 @@ def _surface_candidate_selection_audit(parsed, surface_candidates,*,require_mark
                 continue
             names=(row.get('source_point_names') if field=='markers'
                    else [row.get('source_point_name')])
+            require_this_marker=(field=='markers' and
+                (require_marker_ids is True or any(name in required_names for name in (names or []))))
             candidate_id=row.get('candidate_id',row.get('candidate'))
             key=(str(candidate_id).strip().upper().removeprefix('C')
                  if candidate_id is not None else None)
-            if field=='markers' and require_marker_ids and key in selected_marker_ids:
+            if require_this_marker and key in selected_marker_ids:
                 issues.append({'field':field,'selected_candidate_id':candidate_id,
                     'reason':'candidate_id_reused_for_distinct_markers'})
             if field=='markers' and key:selected_marker_ids.add(key)
             if (candidate_id is not None and key not in valid_ids or
-                    field=='markers' and require_marker_ids and candidate_id is None):
+                    require_this_marker and candidate_id is None):
                 issues.append({'field':field,'selected_candidate_id':candidate_id,
                     'reason':'explicit_valid_candidate_id_required',
                     'valid_candidate_ids':['C'+value for value in sorted(valid_ids)]})
                 continue
             for name in names or []:
                 allowed=sorted(candidate_sources.get(name,set()),key=lambda value:(not value.isdigit(),int(value) if value.isdigit() else value))
+                selected_candidate=candidates_by_id.get(key) if key else None
+                selected_view=(selected_candidate or {}).get('view_id') if candidate_id is not None else row.get('view_id')
+                blocked_views={view for candidate in surface_candidates
+                    for view in candidate.get('blocked_view_ids_by_source_name',{}).get(name,[])}
+                # If two different measured XYZ points collapsed to one
+                # orthographic pixel, that view cannot distinguish their
+                # depth positions. Keep the alternate-view constraint hard
+                # even when the vision model returns raw UV instead of a
+                # candidate ID.
+                if selected_view in blocked_views:
+                    issues.append({'field':field,'source_point_name':name,
+                        'selected_view_id':selected_view,
+                        'reason':'collapsed_source_point_view_forbidden',
+                        'required_alternate_views':sorted(
+                            {'+X','-X','+Y','-Y','+Z','-Z'}-blocked_views)})
+                    if len(issues)>=40:
+                        return issues
                 # Candidate atlases are optional search hints. A model may
                 # instead make an explicit view/UV choice; exact CAD ray hits,
                 # rigid XYZ fitting, and full-group gates still validate it.
@@ -1086,11 +1174,13 @@ def _mark_model_selected_xyz_group(store, project, item, detail, model, mesh, ca
         frame_options=[dict(candidate_id='BASE',frames=selected_frames,
                             projection=base_projection,zeroed_translation_components=[],
                             geometry_gate='passed')]
-    if not frame_options and frame_hypotheses:
+    if frame_hypotheses:
         # A frame-wide model decision can fit some feature families while
-        # failing another FAI in that alignment. Offer the original rigid
-        # hypotheses again at FAI scope; never let geometry pick the answer.
-        # The complete source group must pass unchanged gates for each option.
+        # failing another FAI in that alignment. Even when the selected frame
+        # happens to put every point on some CAD face, its semantic feature or
+        # side can still be wrong. Offer the other complete rigid hypotheses
+        # at FAI scope so Strata can compare their full-group overlays; never
+        # let geometry pick the answer. Every option must pass unchanged gates.
         scopes=sorted(coordinate_scopes,key=str)
         by_scope=[]
         for scope in scopes:
@@ -1281,7 +1371,22 @@ def _mark_model_selected_xyz_group(store, project, item, detail, model, mesh, ca
     messages=[{'role':'user','content':question,'attachments':[{'filename':'MSOP, drawing, model-selected CAD XYZ overlay',
         'parsed_text':context,'images':model_images}]}]
     try:
-        raw,truncated,tokens=model._generate_once(messages,max_context_chars=len(context)+len(question)+512,
+        request_messages=messages
+        try:
+            request_budget=_complete_visual_context_budget(request_messages)
+        except ValueError as budget_error:
+            if 'context budget' not in str(budget_error):
+                raise
+            request_messages=[_compact_visual_evidence_message(messages[0],fai=item['number'],
+                source_points=source_points,source_pages=[row.get('page') for row in detail.get('methods',[])],
+                mode='frame_candidate')]
+            try:
+                request_budget=_complete_visual_context_budget(request_messages)
+            except ValueError as compact_error:
+                return dict(fai=item['number'],result='abstain_or_invalid',
+                    reason='visual_evidence_exceeds_context_budget',error=str(compact_error)[:300],
+                    source_point_count=len(source_points),preserved_complete_source_evidence=True)
+        raw,truncated,tokens=model._generate_once(request_messages,max_context_chars=request_budget,
                                                    max_new_tokens=1536,max_images=len(model_images))
     except Exception as exc:
         return dict(fai=item['number'],result='abstain_or_invalid',reason='local_vision_inference_failed',
@@ -1343,7 +1448,9 @@ def _mark_model_selected_xyz_group(store, project, item, detail, model, mesh, ca
         source_point_names=[row.get('name') or row.get('source_name')] if row.get('name') or row.get('source_name') else [])
         for row in point_audit]
     entity_review=_review_visual_entity_group(store,project,item,detail,model,mesh,anchors,
-        review_locations,_method_page_images(store,project,detail,model,item['number']))
+        review_locations,_method_page_images(store,project,detail,model,item['number']),
+        coordinate_frame_audit=_entity_coordinate_frame_audit(
+            frames=selected_frames,point_correspondences=point_audit))
     if entity_review.get('status')!='confirmed':
         return dict(fai=item['number'],result='abstain_or_invalid',reason='local_entity_group_review_not_confirmed',entity_review=entity_review)
     store.annotate(project['id'],item['number'],anchors,note,'auto_marked',
@@ -1743,8 +1850,60 @@ def _review_even_spacing_options(store,project,item,model,mesh,anchors,markers,g
 
 
 
+def _entity_coordinate_frame_audit(*,frames=None,point_correspondences=None,
+                                   source_points=None,rigid_fits=None,locations=None,anchors=None):
+    """Build explicit source-to-CAD coordinate evidence for entity review."""
+    frames=frames or []
+    correspondences=[]
+    for row in point_correspondences or []:
+        if not isinstance(row,dict):
+            continue
+        correspondences.append({key:row.get(key) for key in
+            ('name','program','coordinate_system','source_xyz','transformed_xyz','position') if key in row})
+    fit_rows=[]
+    fits=rigid_fits or {}
+    for scope,fit in fits.items():
+        if not isinstance(fit,dict) or fit.get('rotation') is None or fit.get('translation') is None:
+            continue
+        fit_rows.append(dict(program=scope[0],coordinate_system=scope[1],
+            rotation=np.asarray(fit['rotation'],float).tolist(),
+            translation_mm=np.asarray(fit['translation'],float).tolist(),
+            max_residual_mm=fit.get('max_residual_mm'),rms_residual_mm=fit.get('rms_residual_mm'),
+            source_to_cad_transform_confirmed=True))
+    if source_points and locations and anchors:
+        by_name={row.get('name'):row for row in source_points if isinstance(row,dict) and row.get('name')}
+        for location,anchor in zip(locations,anchors):
+            names=location.get('source_point_names') or []
+            for name in names:
+                source=by_name.get(name)
+                if not source:
+                    continue
+                scope=(source.get('program'),source.get('coordinate_system'))
+                fit=fits.get(scope)
+                transformed=None
+                if fit and isinstance(source.get('xyz'),(list,tuple)) and len(source['xyz'])==3:
+                    transformed=(np.asarray(fit['rotation'],float)@np.asarray(source['xyz'],float)+
+                                 np.asarray(fit['translation'],float)).tolist()
+                correspondences.append(dict(name=name,program=scope[0],coordinate_system=scope[1],
+                    source_xyz=source.get('xyz'),transformed_xyz=transformed,
+                    position=anchor.get('position'),mapping_status='registered' if transformed is not None else 'unregistered'))
+    registered=bool(correspondences) and all(row.get('transformed_xyz') is not None for row in correspondences)
+    return dict(status='registered_mapping_available' if registered else
+        'selected_frame_mapping_available' if frames and correspondences else
+        'partial_or_unregistered',
+        raw_source_xyz_comparable_to_cad_world=False,
+        selected_frames=[{key:frame.get(key) for key in
+            ('program','coordinate_system','hypothesis_id','rotation','translation_mm') if key in frame}
+            for frame in frames if isinstance(frame,dict)],
+        fitted_source_to_cad_frames=fit_rows,
+        source_xyz_to_cad_xyz=correspondences,
+        numeric_comparison_allowed_only_after_transform=True,
+        metrology_accepted=False)
+
+
 def _review_visual_entity_group(store,project,item,detail,model,mesh,anchors,locations,images,*,
-        source_manifest=None,drawing_manifest=None):
+        source_manifest=None,drawing_manifest=None,coordinate_frame_audit=None,
+        part_identity_context=None,part_identity_screening_audit=None):
     """Fresh local-model verification of entity identity, not just CAD contact.
 
     This review cannot move or create anchors. Geometry-only displays can hide
@@ -1766,7 +1925,11 @@ def _review_visual_entity_group(store,project,item,detail,model,mesh,anchors,loc
             if row.get('id')==item.get('document_id')),None),'markers':rows,
         'methods':detail.get('methods',[]),'allowed_source_names':printed_feature_names(detail.get('methods',[])),
         'integrity_version':VERSION,'source_manifest':source_manifest or {},
-        'drawing_manifest':drawing_manifest or {}}
+        'drawing_manifest':drawing_manifest or {},
+        'part_identity_context':part_identity_context or {},
+        'part_identity_screening_audit':part_identity_screening_audit or {},
+        'coordinate_frame_audit':coordinate_frame_audit or {
+            'status':'not_supplied','raw_source_xyz_comparable_to_cad_world':False}}
     content=json.dumps(evidence,sort_keys=True,ensure_ascii=False).encode()
     key=hashlib.sha256(content+Path(__file__).with_name('cad_view_atlas.py').read_bytes()).hexdigest()
     output=store._dir(project['id'])/'automatic-learning'/f'entity-review-{key[:24]}.png'
@@ -1803,6 +1966,21 @@ def _review_visual_entity_group(store,project,item,detail,model,mesh,anchors,loc
         '若没有打印特征名则source_names为空数组；有打印名但无法判断对应关系则ABSTAIN。'
         'instance_path必须逐项复制被复核CAD面的实例路径，evidence必须解释原页特征如何对应此实例与落点。'
         '使用紧凑JSON，每项evidence只写简短证据，不重复抄写XYZ；必须完整输出所有marker的feature_assignments。')
+    question+=(
+        '坐标系规则：MSOP XYZ 属于其 program / coordinate_system，CAD marker.position 属于 CAD mesh-world；'
+        '两者默认不是同一坐标系，禁止把原始 MSOP XYZ 与 CAD world 数值直接比较并据此拒绝。'
+        '只有随附 coordinate_frame_audit 明确提供已选变换及 source_xyz_to_cad_xyz 映射时，才可核对变换后的数值；'
+        '若没有映射，按原始 MSOP/图纸图像中的特征、实例、正反面和引线复核，单凭 raw XYZ 差值不得 REJECT。'
+        '此规则不放宽实体实例、特征侧、完整数量、引线对应和 CAD 面身份检查；语义证据仍不足时必须 ABSTAIN。')
+    if part_identity_context:
+        question+=(
+            '附带的 part_identity_context 是本地模型根据同一 MSOP、图纸和 CAD 原始 body 图册选出的宿主零件候选，不是真值。'
+            '核对每个 marker 的 instance_path 是否属于这些候选 body，并把图纸中测量特征与对应主体联系起来；'
+            '若选择记录和当前 marker 实例不一致，REJECT；若主体对应仍无来源支持，ABSTAIN。')
+    if part_identity_screening_audit:
+        question+=(
+            '另附未确认的CAD主体筛选过程，只作候选搜索记录，不是真值。你可以用其中的候选编号和原始body图册核查实体对应；'
+            '筛选未确认本身不能作为接受理由，也不能把它当成点位授权；实体身份仍须按原始MSOP/图纸证据独立确认。')
     messages=[{'role':'user','content':question,'attachments':[{'filename':'Original sources and unverified entity group',
         'parsed_text':json.dumps(context,ensure_ascii=False),
         'images':list(dict.fromkeys([*images,str(output)]))}]}]
@@ -1899,6 +2077,17 @@ def _normalize_model_source_aliases(parsed, known_source_points, allowed_source_
             row=dict(row)
             if field=='markers':
                 names=row.get(key_field)
+                # Some vision responses put the exact MSOP point identifier
+                # in `feature` but omit the contract's source_point_names
+                # field. Recover only a unique, exact/canonical source name;
+                # prose labels and ambiguous aliases remain unresolved.
+                if not names and isinstance(row.get('feature'),str):
+                    feature=row['feature'].strip()
+                    canonical_feature=_canonical_source_point_alias(feature)
+                    resolved=(feature if feature in expected else aliases.get(canonical_feature))
+                    if resolved is not None:
+                        names=[resolved]
+                        changed.append({'from_feature':feature,'to_source_point_name':resolved})
             else:
                 names=[row.get(key_field)]
             if isinstance(names,list):
@@ -2062,21 +2251,50 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
     regenerated here, and full FAI geometry gates remain mandatory after merge.
     """
     options={name:['C'+str(candidate['id']).removeprefix('C') for candidate in surface_candidates
-        if candidate.get('id') is not None and
+        if candidate.get('id') is not None and candidate.get('view_id') not in
+            set(candidate.get('blocked_view_ids_by_source_name',{}).get(name,[])) and
         (name in (candidate.get('source_point_names') or []) or
          candidate.get('candidate_role')=='global_surface_search')]
         for name in expected_names}
+    blocked={name:sorted({view for candidate in surface_candidates
+        for view in candidate.get('blocked_view_ids_by_source_name',{}).get(name,[])})
+        for name in expected_names}
+    blocked={name:views for name,views in blocked.items() if views}
     contract=('\nCurrent subset output contract: markers must cover ONLY '+json.dumps(expected_names)+
         ', each name exactly once. Do not add a point from another subset to close a loop or build a plane. '+
         'Full-group totals in the source apply after the service merges all subsets. '+
         'Return the complete corrected subset yourself; the service will not trim your response. '+
-        'Per-point CAD candidate IDs (search hints, not proof of entity identity): '+json.dumps(options)+'.')
+        'Per-point CAD candidate IDs (search hints, not proof of entity identity): '+json.dumps(options)+'. '+
+        ('For these source points the prior view collapsed distinct XYZ depths and is forbidden; choose a different view: '+
+         json.dumps(blocked)+'. The service will reject the forbidden view even if you return raw UV. '
+         if blocked else ''))
     base={**message,'content':message['content']+contract}
-    current=base;attempts=[];total_tokens=0
+    current=base;attempts=[];total_tokens=0;last_issues=[]
     for index in range(max_repairs+1):
         try:
-            raw,truncated,tokens=model._generate_once([current],
-                max_context_chars=_complete_visual_context_budget([current]),
+            request_messages=[current]
+            try:
+                request_budget=_complete_visual_context_budget(request_messages)
+            except ValueError as budget_error:
+                if 'context budget' not in str(budget_error):
+                    raise
+                # Large chunk retries repeat the full FAI prompt and can push
+                # a complete source attachment over budget. Keep every source
+                # attachment intact, replacing only repeated instructions and
+                # prior output with the exact subset contract and diagnostics.
+                compact=_compact_visual_evidence_message(base,fai=fai,
+                    source_points=source_points,source_pages=allowed_source_pages,
+                    surface_candidates=surface_candidates,mode='markers',
+                    failure_summary=last_issues)
+                compact['content']+=('\nThis is chunk '+json.dumps(expected_names,ensure_ascii=False)+
+                    ' only; emit each listed source point once and no other point. '
+                    'Per-point eligible CAD candidate IDs: '+json.dumps(options,ensure_ascii=False,
+                        separators=(',',':'))+'.')
+                request_messages=[compact]
+                request_budget=_complete_visual_context_budget(request_messages)
+                current=compact
+            raw,truncated,tokens=model._generate_once(request_messages,
+                max_context_chars=request_budget,
                 max_new_tokens=4096,max_images=8,temperature=temperature)
         except Exception as exc:
             attempts.append({'error':f'{type(exc).__name__}: {exc}'[:1000]})
@@ -2085,6 +2303,7 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
         parsed=_object(raw) or {}
         parsed,aliases=_normalize_model_source_aliases(parsed,source_points,allowed_source_pages)
         issues=_visual_chunk_contract_issues(parsed,expected_names,fai=fai,surface_candidates=surface_candidates)
+        last_issues=issues
         attempts.append({'raw_output':raw,'truncated':bool(truncated),'generated_tokens':tokens,
             'source_name_aliases':aliases,'contract_issues':issues})
         if not issues and not truncated:return parsed,raw,False,total_tokens,aliases,attempts
@@ -2276,6 +2495,57 @@ def _coalesce_source_point_definitions(points):
                 'coordinate_variants':variants}
         result.append(merged)
     return result
+
+
+def _source_relation_visual_recovery(strategy, source_manifest_audit, source_points,
+                                     required_marker_count):
+    """Permit visual CAD matching for a complete local-model-confirmed point list.
+
+    A method can name directly measured points that have no XYZ row in the
+    MSOP's coordinate table. That is an unresolved coordinate relation, not
+    proof that the feature cannot be located: the method/Plane View/drawing
+    images can still identify each point on the CAD. Keep the missing XYZs
+    explicit and let the ordinary ray-hit and independent entity gates decide.
+    """
+    if not (isinstance(strategy,dict) and strategy.get('next_route')=='evidence_repair'
+            and isinstance(source_manifest_audit,dict)
+            and source_manifest_audit.get('coordinate_evidence_missing')):
+        return None
+    if source_manifest_audit.get('status')!='confirmed' or not isinstance(source_points,list) or not source_points:
+        return None
+    names=[row.get('name') for row in source_points if isinstance(row,dict)]
+    groups=source_manifest_audit.get('groups') or []
+    declared={name for group in groups if isinstance(group,dict)
+        for name in group.get('source_point_names',[]) if isinstance(name,str)}
+    expected_count=required_marker_count or sum(
+        group.get('declared_count',0) for group in groups if isinstance(group,dict)
+        and isinstance(group.get('declared_count'),int))
+    if (len(names)!=len(source_points) or len(set(names))!=len(names)
+            or set(names)!=declared or expected_count!=len(names)
+            or any(not row.get('explicit_method_manifest') for row in source_points)):
+        return None
+    missing=sorted(row['name'] for row in source_points
+        if not isinstance(row.get('xyz'),list) or len(row['xyz'])!=3)
+    if set(missing)!=set(source_manifest_audit['coordinate_evidence_missing']):
+        return None
+    return {'reason':'source_coordinate_relation_unresolved_visual_recovery',
+        'missing_xyz_source_point_names':missing,
+        'recovery_route':'local_model_visual_to_exact_CAD_ray_hit_then_entity_review',
+        'source_manifest_confirmed':True,
+        'source_xyz_substitution_allowed':False,
+        'metrology_accepted':False}
+
+
+def _part_identity_route(strategy):
+    """Select host CAD parts for explicit routes and partial-XYZ recovery."""
+    if not isinstance(strategy,dict):
+        return False,False
+    route=strategy.get('next_route')
+    required=route in ('feature_topology_graph','drawing_pattern_to_part')
+    optional=(route=='evidence_repair' and (
+        strategy.get('evidence_class') in ('partial_xyz','named_features_no_xyz') or
+        strategy.get('failure_class')=='source_manifest'))
+    return required,optional
 
 
 def _coordinate_variant_geometry_evidence(mesh,source_points,registration_diagnostic):
@@ -2698,6 +2968,18 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
         'specifications':item.get('specifications',[]),'warnings':item.get('warnings',[])},ensure_ascii=False)
     candidate=candidate or {}
     evidence=candidate.get('evidence') or {}
+    part_screening_audit=evidence.get('part_identity_screening_audit') or {}
+    if part_screening_audit:
+        from .part_identity import render_screening_montage
+        screening_paths=[path for row in part_screening_audit.get('screening',[])
+            if isinstance(row,dict) for path in row.get('catalog_images',[])
+            if isinstance(path,str)]
+        if screening_paths:
+            montage_key=hashlib.sha256(json.dumps(screening_paths).encode()).hexdigest()[:20]
+            montage=render_screening_montage(screening_paths,
+                store._dir(project['id'])/'automatic-learning'/'part-catalog'/
+                f'part-screening-review-{montage_key}.png')
+            if montage:images=list(dict.fromkeys([*images,montage]))
     known_source_points=_coalesce_source_point_definitions(
         candidate.get('known_source_points') or evidence.get('known_source_points') or [])
     required_marker_count=(candidate.get('required_marker_count') or evidence.get('required_marker_count') or 0)
@@ -2733,11 +3015,15 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
         return dict(fai=item['number'],result='abstain_or_invalid',
                     reason='local_source_manifest_not_confirmed',local_model_audit=source_manifest_audit)
     strategy=evidence.get('fai_strategy') or {}
+    source_relation_visual_recovery=None
     if (strategy.get('next_route')=='evidence_repair'
             and source_manifest_audit.get('coordinate_evidence_missing')):
-        return dict(fai=item['number'],result='abstain_or_invalid',
-            reason='classified_source_relation_graph_unresolved',
-            local_model_audit=source_manifest_audit,strategy_route='evidence_repair')
+        source_relation_visual_recovery=_source_relation_visual_recovery(strategy,
+            source_manifest_audit,known_source_points,required_marker_count)
+        if source_relation_visual_recovery is None:
+            return dict(fai=item['number'],result='abstain_or_invalid',
+                reason='classified_source_relation_graph_unresolved',
+                local_model_audit=source_manifest_audit,strategy_route='evidence_repair')
     if source_manifest_audit['status']=='confirmed':
         chosen={row['declared_source_name']:row['name'] for row in known_source_points}
         required_marker_groups=[{**group,'source_point_names':[
@@ -2750,11 +3036,14 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
     registration_diagnostic=evidence.get('registration_diagnostic')
     rejected_atlas=None
     group_result=(None if part_context else _mark_model_selected_xyz_group(store,project,item,detail,model,mesh,candidate))
-    group_review_diagnostic=None
+    group_review_diagnostic=source_relation_visual_recovery
     if group_result is None and strategy.get('evidence_class','').startswith('complete_xyz_'):
-        return dict(fai=item['number'],result='abstain_or_invalid',
-            reason='classified_xyz_frame_evidence_unavailable',strategy_route=strategy.get('next_route'),
-            source_point_count=len(known_source_points),classified_route_no_pixel_guessing=True)
+        # A missing global frame decision does not end a complete-XYZ FAI.
+        # Continue to the FAI-scoped correspondence route below, where the
+        # local model can pair the original XYZ group with CAD atlas features
+        # and the full group must pass rigid-shape and surface gates.
+        group_review_diagnostic={'reason':'global_frame_candidate_unavailable',
+            'classified_route':strategy.get('next_route')}
     if group_result is not None:
         if group_result.get('result')=='accepted':
             return group_result
@@ -2763,13 +3052,13 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
         # FAI-scoped correspondence from the original MSOP points and CAD
         # atlas below. Keep the failed attempt visible as evidence so the
         # retry cannot silently inherit its placement.
-        if strategy.get('evidence_class','').startswith('complete_xyz_'):
-            return {**group_result,'strategy_route':strategy.get('next_route'),
-                'classified_route_no_pixel_guessing':True}
-        if group_result.get('reason') in (
+        retryable_group_failures=(
                 'model_xyz_group_review_abstained_or_invalid',
                 'model_xyz_group_geometry_gate_failed',
-                'no_fai_local_frame_candidate_passed_geometry_gate'):
+                'no_fai_local_frame_candidate_passed_geometry_gate',
+                'local_entity_group_review_not_confirmed')
+        if (strategy.get('evidence_class','').startswith('complete_xyz_')
+                or group_result.get('reason') in retryable_group_failures):
             group_review_diagnostic={key:value for key,value in group_result.items()
                                      if key not in ('raw_output',)}
             rejected_atlas=group_result.get('model_candidate_atlas_path')
@@ -2778,7 +3067,7 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                 # the right feature region. It is a search hint only; the
                 # subsequent FAI-level correspondences must pass fresh gates.
                 model_images=list(dict.fromkeys([*images,rejected_atlas]))
-        else:
+        elif group_result.get('reason') not in retryable_group_failures:
             return group_result
     ambiguous_coordinate_points=[point['name'] for point in known_source_points
         if point.get('requires_variant_choice') or len({(variant.get('program'),variant.get('coordinate_system'),tuple(variant.get('xyz') or []))
@@ -2847,9 +3136,18 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
         '本轮只需把该 FAI 对应的实体试验位置标在 CAD 上，使用同一条目关联的 XYZ 点名、特征名和图纸视图；'
         '不得声称 AOI 可以执行破坏性或力学测试，也不得把试验力值当成视觉尺寸。只有找不到可识别的物理位置时才弃答。'
         if location_only_test else '')
+    visual_only_source_instruction=(
+        '本 FAI 的直接测量点名已由本地模型按 MSOP 原文清单确认，但下列点没有可用的 MSOP XYZ 行：'
+        f"{json.dumps(source_relation_visual_recovery['missing_xyz_source_point_names'],ensure_ascii=False)}。"
+        '只能根据随附的 MSOP 测量页/Plane View、对应 2D 图纸及 CAD 正交视图，由你逐点建立语义对应；'
+        '不得把相似点名、同族 FAI、相邻点或构造元素的 XYZ 冒充这些点的坐标。每个点选择 CAD 射线实际命中的位置，'
+        '最终还须通过整组实体复核；若点位不能从原图唯一辨认，返回 ABSTAIN。系统生成的 XYZ 是所选 CAD 交点坐标，'
+        '不是 MSOP 原文坐标或计量认证。'
+        if source_relation_visual_recovery else '')
     question=(
         VIEWER_LOCATION_TASK+
         '你是负责完成本次自动标记的本地模型；你现在有权依据随附的 MSOP 原页、2D工程图、已提取 XYZ 证据和当前 CAD 六视图图集自行提出并授权一个新的 FAI 级放置。无需等待外部或人工批准。'
+        +visual_only_source_instruction+
         '此前的坐标变换或点组审核若被标为 rejected，表示该方案已被数值门限否决，不能沿用；它不代表这个 FAI 无法定位。'
         '若附图中有彩色 XYZ 叠加，那是已被数值门限拒绝的粗略搜索提示，只帮助找到对应 CAD 特征区域；不得将它当成已验证位置。必须重新给出稀疏配准参考和完整测量点归属，程序会独立拟合并校验。'
         '先从原文确认确切 FAI、被测特征和视图，再在 CAD 图集中选择能看到该特征的视图及特征中心位置。'
@@ -2934,6 +3232,7 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
     # local-model decision rather than terminating after only two retries.
     max_visual_attempts=6
     surface_candidates=[]
+    candidate_required_source_names=set()
     visual_point_chunks=(_partition_visual_source_points(known_source_points,
         required_marker_groups=required_marker_groups)
         if required_marker_count==len(known_source_points) else [])
@@ -3008,7 +3307,29 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
             raw=json.dumps(parsed_chunks,ensure_ascii=False,separators=(',',':'))
         else:
             try:
-                raw,truncated,tokens=model._generate_once(messages,max_context_chars=_complete_visual_context_budget(messages),
+                request_messages=messages
+                try:
+                    request_budget=_complete_visual_context_budget(request_messages)
+                except ValueError as budget_error:
+                    if 'context budget' not in str(budget_error):
+                        raise
+                    prior_failures=locals().get('validation_failures',[])
+                    compact_failures=[{key:row[key] for key in ('code','actual','expected',
+                        'missing_count','missing_names') if key in row}
+                        for row in prior_failures if isinstance(row,dict)]
+                    request_messages=[_compact_visual_evidence_message(messages[0],
+                        fai=item['number'],source_points=known_source_points,
+                        source_pages=allowed_source_pages,required_marker_groups=required_marker_groups,
+                        surface_candidates=surface_candidates,mode='markers',
+                        failure_summary=compact_failures)]
+                    try:
+                        request_budget=_complete_visual_context_budget(request_messages)
+                    except ValueError as compact_error:
+                        return dict(fai=item['number'],result='abstain_or_invalid',
+                            reason='visual_evidence_exceeds_context_budget',error=str(compact_error)[:300],
+                            source_point_count=len(known_source_points),
+                            preserved_complete_source_evidence=True)
+                raw,truncated,tokens=model._generate_once(request_messages,max_context_chars=request_budget,
                     max_new_tokens=4096,max_images=8,
                     temperature=min(.35,.12*attempt))
             except Exception as exc:
@@ -3035,7 +3356,8 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
             if conflicts:
                 raw_parsed['_coordinate_choice_conflicts']=conflicts
         candidate_selection_audit=_surface_candidate_selection_audit(raw_parsed,surface_candidates,
-            require_marker_ids=drawing_manifest_audit.get('status')=='confirmed')
+            require_marker_ids=(True if drawing_manifest_audit.get('status')=='confirmed'
+                else candidate_required_source_names))
         candidate_selection_valid=not candidate_selection_audit
         parsed=_resolve_surface_candidate_ids(raw_parsed,surface_candidates)
         decision=re.sub(r'[^A-Z_]','',str(parsed.get('decision') or '').upper())
@@ -3153,8 +3475,63 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                     ' 上次 JSON 未满足完整标记组或字段约束。请重新核对 FAI 编号、每个必需位置和允许视图，'
                     f"按以下独立校验失败原因修正：{json.dumps(validation_failures,ensure_ascii=False)}。"
                     '严格按 JSON schema 输出；不能完整判断时返回 ABSTAIN。')
-                messages=[{'role':'user','content':question+correction,
-                           'attachments':messages[0]['attachments']}]
+                retry_message={'role':'user','content':question+correction,
+                    'attachments':messages[0]['attachments']}
+                try:
+                    _complete_visual_context_budget([retry_message])
+                except ValueError as budget_error:
+                    if 'context budget' not in str(budget_error):
+                        raise
+                    # Retain the complete original source prompt and its
+                    # attachments, but avoid repeating long prose and model
+                    # output in every repair turn. Keep all actionable names,
+                    # counts, and exact candidate IDs in a compact audit row.
+                    compact_failures=[]
+                    for failure in validation_failures:
+                        if not isinstance(failure,dict):
+                            continue
+                        row={key:failure[key] for key in ('code','actual','expected',
+                            'missing_count','missing_names','instruction') if key in failure}
+                        details=failure.get('details')
+                        if isinstance(details,list):
+                            row['details']=[{key:entry[key] for key in (
+                                'source_point_name','selected_candidate_id','valid_candidate_ids',
+                                'reason','field') if key in entry}
+                                for entry in details if isinstance(entry,dict)][:40]
+                        elif isinstance(details,dict):
+                            row['details']={key:details[key] for key in (
+                                'reason','missing_source_points','invalid_source_points',
+                                'coordinate_system','program','max_residual_mm') if key in details}
+                        compact_failures.append(row)
+                    compact_candidates=[]
+                    for row in surface_candidates:
+                        compact={key:row[key] for key in ('id','view_id','uv','feature',
+                            'source_point_names','candidate_role','candidate_roles',
+                            'blocked_view_ids_by_source_name') if key in row}
+                        if compact:
+                            compact_candidates.append(compact)
+                    compact_correction=(
+                        '\n修正上一轮未通过的完整结果；所有 MSOP 点名、XYZ、测量组和原文附件仍以原始证据为准。'
+                        '仅修正以下校验项，不得删点、改点名或省略候选；每个点必须落在正确 CAD 实体且通过射线/刚体校验。'
+                        '紧凑失败清单：'+json.dumps(compact_failures,ensure_ascii=False,separators=(',',':'))+
+                        ('；可选 CAD 射线命中候选（仅搜索提示，ID/view/UV 精确）：'+
+                         json.dumps(compact_candidates,ensure_ascii=False,separators=(',',':'))
+                         if compact_candidates else '')+
+                        ('；保留坐标冲突项的原文 coordinate_choices。' if not coordinate_choices_valid else '')+
+                        ('；对已禁用的源点/视角组合必须换视角，程序会硬性拒绝。'
+                         if any(row.get('reason')=='collapsed_source_point_view_forbidden'
+                                for row in candidate_selection_audit) else '')+
+                        '只返回符合原 JSON schema 的完整修正版。')
+                    retry_message={'role':'user','content':question+compact_correction,
+                        'attachments':messages[0]['attachments']}
+                    try:
+                        _complete_visual_context_budget([retry_message])
+                    except ValueError as compact_error:
+                        return dict(fai=item['number'],result='abstain_or_invalid',
+                            reason='visual_evidence_exceeds_context_budget',
+                            error=str(compact_error)[:300],source_point_count=len(known_source_points),
+                            preserved_complete_source_evidence=True)
+                messages=[retry_message]
                 continue
             return dict(fai=item['number'],result='abstain_or_invalid',reason='model_visual_decision_invalid',
                         truncated=truncated,validation_failures=validation_failures,
@@ -3410,7 +3787,12 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
         if anchors:
             entity_review=_review_visual_entity_group(store,project,item,detail,model,mesh,
                 anchors,locations,images,source_manifest=source_manifest_audit,
-                drawing_manifest=drawing_manifest_audit)
+                drawing_manifest=drawing_manifest_audit,
+                part_identity_context=part_context,
+                part_identity_screening_audit=evidence.get('part_identity_screening_audit'),
+                coordinate_frame_audit=_entity_coordinate_frame_audit(
+                    source_points=list(resolved_sources.values()) if resolved_sources else [],
+                    rigid_fits=rigid_fits,locations=locations,anchors=anchors))
             if entity_review.get('status')!='confirmed':
                 anchors=[]
                 failure_diagnostic={'reason':'local_entity_group_review_not_confirmed',
@@ -3512,11 +3894,13 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                             choice['candidate_roles']=roles
                             choice['original_uv']=candidate_uv
                             surface_candidates.append(choice)
-                    failed_names=list(dict.fromkeys(
-                        name for row in [*missed_points,*failed_registration_rows]
-                        for name in (row.get('source_point_names') or [])))
                     collapsed_depth=(diagnostic.get('reason')==
                         'distinct_source_points_collapsed_to_same_view_uv')
+                    blocked_views_by_name=_blocked_views_from_geometry_diagnostic(diagnostic)
+                    failed_names=list(dict.fromkeys(
+                        [name for row in [*missed_points,*failed_registration_rows]
+                         for name in (row.get('source_point_names') or [])]+
+                        list(blocked_views_by_name)))
                     has_global_pool=any(row.get('candidate_role')=='global_surface_search'
                                         for row in surface_candidates)
                     if (not has_global_pool and
@@ -3539,6 +3923,23 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                                 'measurement_marker','registration_reference']
                             choice['feature']='global CAD ray-hit recovery option'
                             surface_candidates.append(choice)
+                    if blocked_views_by_name:
+                        for choice in surface_candidates:
+                            names=choice.get('source_point_names') or []
+                            restricted={name:sorted(blocked_views_by_name[name])
+                                for name in names if name in blocked_views_by_name}
+                            if restricted:
+                                choice['blocked_view_ids_by_source_name']=restricted
+                    # Once a failed source point has exact CAD ray-hit
+                    # candidates, require the local model to choose one of
+                    # those IDs. This prevents repeated off-surface raw UV
+                    # answers while leaving points without candidates free to
+                    # use another orthographic view.
+                    available_candidate_names={name for choice in surface_candidates
+                        if choice.get('candidate_role')!='registration_reference'
+                        for name in choice.get('source_point_names') or []}
+                    candidate_required_source_names.update(
+                        name for name in failed_names if name in available_candidate_names)
                 failed_marker=next((marker for marker in markers
                     if marker.get('view_id')==failed_view and marker.get('uv')==failed_uv),None)
                 focus_markers=[failed_marker] if failed_marker else markers
@@ -3585,6 +3986,8 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                        '若旧视图没有可用实体候选，应切换到完整图集中另一个能看到该特征的视图，不能在零件外的视图里反复猜UV。'
                        '绿色 C 编号点是附近射线确实命中CAD的可选落点；候选包含 candidate_roles 和 source_point_names，measurement_marker 对应项应在 marker 中使用，registration_reference 对应项应在 registration_points 中使用。参考点必须在同一坐标系内空间分布充分、非共线；不得把多个不同 XYZ 点映射到相同 UV。只有候选确实对应 MSOP 特征时才能选择，并原样输出候选 UV。'
                        '绿色 C 候选图可直接通过 candidate_id（例如 C7）指定 markers 或 registration_points 的精确落点；此 ID 映射到真实 CAD 射线命中，优先输出 ID，不要抄写或估算 UV。每个不同 XYZ 点选择不同候选 ID。若能提出新的完整有效位置组，即使 confidence=low 也应 AUTO_MARK。'
+                       +(' 此次有不同 XYZ 点在同一视图压到相同 UV；对这些 source_point_names，诊断中对应的 view_id 已禁用，必须选择其他正交视图的有效 CAD 命中点。程序会强制拒绝回到该视图的候选ID或原始UV。'
+                         if diagnostic.get('reason')=='distinct_source_points_collapsed_to_same_view_uv' else '')
                        +rigid_fit_instruction,
                        'attachments':[{'filename':'MSOP, drawing, and focused CAD retry view',
                            'parsed_text':context,'images':retry_images}]}]
@@ -3694,20 +4097,26 @@ def mark_geometry_candidates(store, model, model_root: Path, project_id: str, ge
                             strategy_route='assembly_applicability',source_quotes=strategy.get('source_quotes'),
                             model_classification_reason=strategy.get('reason')))
                         continue
-                    if strategy.get('next_route') in ('feature_topology_graph','drawing_pattern_to_part'):
+                    part_identity_required,part_identity_optional=_part_identity_route(strategy)
+                    if part_identity_required or part_identity_optional:
                         from .part_identity import select_physical_parts
                         store.update_local_model_marking(project_id,progress=dict(done=len(results),
                             current_fai=item['number'],message=f"FAI {item['number']}：先核对 CAD 零部件身份与重复实例"))
                         source_images=_method_page_images(store,project,detail,model,item['number'])
-                        parts,part_audit=select_physical_parts(store,project,item,detail,model,mesh,source_images)
+                        parts,part_audit=select_physical_parts(store,project,item,detail,model,mesh,source_images,
+                            geometry_hypothesis=old)
                         if parts is None:
-                            results.append(dict(fai=item['number'],result='abstain_or_invalid',
-                                reason='local_part_identity_not_confirmed',strategy_route=strategy['next_route'],
-                                local_model_audit=part_audit))
-                            continue
-                        context={**part_audit['decision'],'cad_sha256':mesh['source_sha256'],
-                            'receipt':part_audit['receipt'],'strategy_route':strategy['next_route']}
-                        old={**old,'evidence':{**old.get('evidence',{}),'part_identity_context':context}}
+                            if part_identity_required:
+                                results.append(dict(fai=item['number'],result='abstain_or_invalid',
+                                    reason='local_part_identity_not_confirmed',strategy_route=strategy['next_route'],
+                                    local_model_audit=part_audit))
+                                continue
+                            old={**old,'evidence':{**old.get('evidence',{}),
+                                'part_identity_screening_audit':part_audit}}
+                        else:
+                            context={**part_audit['decision'],'cad_sha256':mesh['source_sha256'],
+                                'receipt':part_audit['receipt'],'strategy_route':strategy['next_route']}
+                            old={**old,'evidence':{**old.get('evidence',{}),'part_identity_context':context}}
                     result=_mark_visual_fallback(store,project,item,detail,model,mesh,old)
                     if strategy:result['strategy_route']=strategy.get('next_route')
                     results.append(result)
@@ -3783,8 +4192,54 @@ def mark_geometry_candidates(store, model, model_root: Path, project_id: str, ge
                     [dict(feature='source feature') for _ in anchors],
                     _method_page_images(store,project,detail,model,item['number']))
                 if entity_review.get('status')!='confirmed':
-                    results.append(dict(fai=item['number'],result='abstain_or_invalid',
-                        reason='local_entity_group_review_not_confirmed',entity_review=entity_review))
+                    if old.get('automatic_xyz_hypothesis'):
+                        # A rejected global XYZ placement is a route failure,
+                        # not an FAI failure. Re-solve this complete FAI from
+                        # its own MSOP/drawing evidence against the CAD atlas;
+                        # the independent group and geometry gates still
+                        # decide whether any replacement can be accepted.
+                        try:
+                            fallback_candidate=old
+                            fallback_strategy=strategies.get(item['number']) or {}
+                            part_required,part_optional=_part_identity_route(fallback_strategy)
+                            if part_required or part_optional:
+                                from .part_identity import select_physical_parts
+                                source_images=_method_page_images(store,project,detail,model,item['number'])
+                                selected_parts,part_audit=select_physical_parts(
+                                    store,project,item,detail,model,mesh,source_images,
+                                    geometry_hypothesis=old)
+                                if selected_parts is None:
+                                    if part_required:
+                                        retry_result=dict(fai=item['number'],result='abstain_or_invalid',
+                                            reason='local_part_identity_not_confirmed',
+                                            strategy_route=fallback_strategy.get('next_route'),
+                                            local_model_audit=part_audit)
+                                        results.append(retry_result)
+                                        continue
+                                    fallback_candidate={**old,'evidence':{**old.get('evidence',{}),
+                                        'part_identity_screening_audit':part_audit}}
+                                else:
+                                    part_context={**part_audit['decision'],
+                                        'cad_sha256':mesh['source_sha256'],
+                                        'receipt':part_audit['receipt'],
+                                        'strategy_route':fallback_strategy.get('next_route')}
+                                    fallback_candidate={**old,'evidence':{**old.get('evidence',{}),
+                                        'part_identity_context':part_context}}
+                            retry_result=_mark_visual_fallback(
+                                store,project,item,detail,model,mesh,fallback_candidate)
+                        except Exception as exc:
+                            retry_result=dict(fai=item['number'],result='abstain_or_invalid',
+                                reason='fai_scoped_xyz_fallback_failed',
+                                error=f'{type(exc).__name__}: {exc}'[:500])
+                        retry_result=dict(retry_result,
+                            fallback_route='fai_scoped_xyz_correspondence',
+                            first_pass_rejection={key:entity_review.get(key) for key in
+                                ('status','reason','decision','receipt','receipt_sha256')
+                                if entity_review.get(key) is not None})
+                        results.append(retry_result)
+                    else:
+                        results.append(dict(fai=item['number'],result='abstain_or_invalid',
+                            reason='local_entity_group_review_not_confirmed',entity_review=entity_review))
                     continue
                 store.annotate(project_id, item['number'], anchors, note, 'auto_marked',
                                mesh['source_sha256'], item['document_id'], 'local_model_candidate', confidence, feature_verification=entity_review)

@@ -33,6 +33,51 @@ def test_retry_context_budget_preserves_all_source_text_or_refuses_the_call():
         local_matching._complete_visual_context_budget(messages,limit=100)
 
 
+def test_compact_visual_retry_keeps_complete_source_attachment_and_candidate_constraints():
+    source='Complete MSOP XYZ evidence. '+('PNT [1,2,3] preserved. '*2100)+'LAST_SOURCE_POINT'
+    original={'role':'user','content':'Verbose repeated prompt. '*900,
+        'attachments':[{'filename':'Original MSOP and drawing','parsed_text':source,
+                        'images':['msop.png','drawing.png']}]}
+    compact=local_matching._compact_visual_evidence_message(original,fai=6,
+        source_points=[{'name':'N2_PNT1','xyz':[1,2,3]}],source_pages=[45],
+        required_marker_groups=[{'group_id':'N2','declared_count':1,'source_point_names':['N2_PNT1']}],
+        surface_candidates=[{'id':7,'view_id':'-X','uv':[.4,.6],
+            'source_point_names':['N2_PNT1'],
+            'blocked_view_ids_by_source_name':{'N2_PNT1':['+Z']}}],
+        failure_summary=[{'code':'collapsed_source_point_view_forbidden'}])
+    assert local_matching._complete_visual_context_budget([compact]) < 58000
+    assert compact['attachments'][0]['parsed_text']==source
+    assert compact['attachments'][0]['images']==['msop.png','drawing.png']
+    assert 'LAST_SOURCE_POINT' in compact['attachments'][0]['parsed_text']
+    assert 'blocked_view_ids_by_source_name' in compact['content']
+
+
+def test_visual_chunk_compacts_prompt_on_budget_error_without_truncating_source_evidence():
+    source='Complete original MSOP coordinate table. '+('PNT XYZ row preserved. '*2200)+'LAST_XYZ_ROW'
+    markers=[{'source_point_names':[name],'view_id':'+Z','uv':uv,'feature':name,'source_pages':[1]}
+        for name,uv in [('A_PNT1',[.3,.4]),('A_PNT2',[.7,.6])]]
+    raw=json.dumps({'decision':'AUTO_MARK','fai':2,'markers':markers,
+        'confidence':'low','evidence':'Source page defines both points.','source_pages':[1]},separators=(',',':'))
+    class Model:
+        calls=0
+        request=None
+        def _generate_once(self,messages,**kwargs):
+            self.calls+=1;self.request=messages
+            assert local_matching._complete_visual_context_budget(messages)<=kwargs['max_context_chars']
+            return raw,False,100
+    model=Model()
+    message={'role':'user','content':'Verbose repeated visual task. '*1200,
+        'attachments':[{'filename':'MSOP and drawing','parsed_text':source,'images':['source.png']}]}
+    points=[{'name':'A_PNT1','pages':[1]},{'name':'A_PNT2','pages':[1]}]
+    parsed,returned,truncated,tokens,_aliases,repairs=local_matching._request_visual_marker_chunk(
+        model,message,fai=2,expected_names=['A_PNT1','A_PNT2'],source_points=points,
+        allowed_source_pages={1})
+    assert not truncated and parsed['decision']=='AUTO_MARK' and tokens==100
+    assert model.calls==1 and repairs[-1]['contract_issues']==[]
+    assert model.request[0]['attachments'][0]['parsed_text']==source
+    assert 'LAST_XYZ_ROW' in model.request[0]['attachments'][0]['parsed_text']
+
+
 def test_drawing_count_retry_requires_distinct_explicit_candidate_ids():
     choices=[{'id':7},{'id':8}]
     assert _surface_candidate_selection_audit({'markers':[{'candidate_id':'C99'}]},choices)
@@ -43,6 +88,58 @@ def test_drawing_count_retry_requires_distinct_explicit_candidate_ids():
     assert any(row.get('reason')=='candidate_id_reused_for_distinct_markers' for row in issues)
     assert not _surface_candidate_selection_audit({'markers':[
         {'candidate_id':'C7'},{'candidate_id':'C8'}]},choices,require_marker_ids=True)
+
+
+def test_collapsed_xyz_source_points_cannot_reuse_the_same_view_by_uv_or_candidate_id():
+    choices=[
+        {'id':1,'view_id':'+Z','uv':[.32,.96],
+         'source_point_names':['N2_PNT2','N4_PNT2'],
+         'blocked_view_ids_by_source_name':{'N2_PNT2':['+Z'],'N4_PNT2':['+Z']}},
+        {'id':2,'view_id':'-X','uv':[.6,.4],
+         'source_point_names':['N2_PNT2','N4_PNT2'],
+         'blocked_view_ids_by_source_name':{'N2_PNT2':['+Z'],'N4_PNT2':['+Z']}},
+    ]
+    raw_uv=_surface_candidate_selection_audit({'markers':[
+        {'source_point_names':['N2_PNT2'],'view_id':'+Z','uv':[.32,.96]}]},choices)
+    assert any(row['reason']=='collapsed_source_point_view_forbidden' for row in raw_uv)
+    candidate_id=_surface_candidate_selection_audit({'markers':[
+        {'source_point_names':['N4_PNT2'],'candidate_id':'C1'}]},choices)
+    assert any(row['reason']=='collapsed_source_point_view_forbidden' for row in candidate_id)
+    alternate=_surface_candidate_selection_audit({'markers':[
+        {'source_point_names':['N4_PNT2'],'candidate_id':'C2'}]},choices)
+    assert not alternate
+
+
+def test_geometry_recovery_requires_unique_candidate_ids_only_for_points_with_candidates():
+    choices=[
+        {'id':1,'view_id':'-X','uv':[.31,.62],'source_point_names':['P1']},
+        {'id':2,'view_id':'+Y','uv':[.72,.48],'source_point_names':['P1']},
+    ]
+    missing=_surface_candidate_selection_audit({'markers':[
+        {'source_point_names':['P1'],'view_id':'+Z','uv':[.2,.2]},
+        {'source_point_names':['P2'],'view_id':'+Z','uv':[.8,.8]}]},choices,
+        require_marker_ids={'P1'})
+    assert sum(row.get('reason')=='explicit_valid_candidate_id_required' for row in missing)==1
+    selected=_surface_candidate_selection_audit({'markers':[
+        {'source_point_names':['P1'],'candidate_id':'C1'},
+        {'source_point_names':['P2'],'view_id':'+Z','uv':[.8,.8]}]},choices,
+        require_marker_ids={'P1'})
+    assert not selected
+    reused=_surface_candidate_selection_audit({'markers':[
+        {'source_point_names':['P1'],'candidate_id':'C1'},
+        {'source_point_names':['P1'],'candidate_id':'C1'}]},choices,
+        require_marker_ids={'P1'})
+    assert any(row.get('reason')=='candidate_id_reused_for_distinct_markers' for row in reused)
+
+
+def test_collapsed_group_diagnostic_keeps_all_overlapping_names_when_ray_misses_another_point():
+    blocked=local_matching._blocked_views_from_geometry_diagnostic({
+        'reason':'distinct_source_points_collapsed_to_same_view_uv','view_id':'+Z',
+        'source_point_names':['IN_PNT_Q18','IN_PNT_Q28'],
+        'missed_marker_points':[{'source_point_names':['IN_PNT_Q45'],'view_id':'+Z'}]})
+    assert blocked=={'IN_PNT_Q18':{'+Z'},'IN_PNT_Q28':{'+Z'},'IN_PNT_Q45':{'+Z'}}
+    assert local_matching._blocked_views_from_geometry_diagnostic(
+        {'reason':'marker_view_ray_missed_CAD','view_id':'+Z','source_point_names':['P1']})=={}
 
 
 def test_even_spacing_search_gate_rejects_clusters_without_assuming_a_straight_line():
@@ -200,6 +297,24 @@ def test_unambiguous_point_name_and_numeric_page_aliases_normalize_exactly():
     assert normalized['coordinate_choices'][0]=={'name':'DATUMC_PNT_P04','page':61}
     assert aliases==[{'from':'DATUMC_P04','to':'DATUMC_PNT_P04'},
                      {'from':'DATUMC_P04','to':'DATUMC_PNT_P04'}]
+
+
+def test_exact_feature_identifier_recovers_omitted_source_point_name_field():
+    parsed={'markers':[{'feature':'R2_PNT_P2','view_id':'+Z','uv':[.5,.5]}]}
+    normalized,aliases=_normalize_model_source_aliases(parsed,
+        [{'name':'R2_PNT_P2'}],{28})
+    assert normalized['markers'][0]['source_point_names']==['R2_PNT_P2']
+    assert aliases==[{'from_feature':'R2_PNT_P2','to_source_point_name':'R2_PNT_P2'}]
+
+
+def test_ambiguous_or_prose_feature_does_not_fill_source_point_names():
+    parsed={'markers':[{'feature':'PNT_P2','view_id':'+Z','uv':[.5,.5]},
+                       {'feature':'top left point','view_id':'+Z','uv':[.5,.6]}]}
+    normalized,aliases=_normalize_model_source_aliases(parsed,
+        [{'name':'R2_PNT_P2'},{'name':'S2_PNT_P2'}],{28})
+    assert 'source_point_names' not in normalized['markers'][0]
+    assert 'source_point_names' not in normalized['markers'][1]
+    assert aliases==[]
 
 
 def test_conflicting_xyz_variants_are_resolved_by_an_explicit_local_model_choice():
@@ -795,7 +910,9 @@ def test_many_coordinate_conflicts_are_selected_locally_in_complete_image_ground
     assert len(choices)==13 and {row['name'] for row in choices}=={p['name'] for p in points}
 
 
-def test_fai_specific_alternative_cannot_mark_without_explicit_local_model_choice(tmp_path,monkeypatch):
+@pytest.mark.parametrize('base_passes_geometry',[False,True])
+def test_fai_specific_alternatives_are_offered_even_when_base_passes_geometry(tmp_path,monkeypatch,
+                                                                             base_passes_geometry):
     monkeypatch.setattr(local_matching,'_review_visual_entity_group',lambda *a,**k:{'status':'confirmed'})
     from PIL import Image
     import oracle_viewer.cad_view_atlas as atlas
@@ -816,13 +933,17 @@ def test_fai_specific_alternative_cannot_mark_without_explicit_local_model_choic
     class Model:
         def __init__(self,decision):self.decision=decision
         def _generate_once(self,messages,**kwargs):
-            assert 'H01' in messages[0]['attachments'][0]['parsed_text']
+            context=messages[0]['attachments'][0]['parsed_text']
+            option_ids=__import__('re').findall(r'"candidate_id"\s*:\s*"(H\d+)"',context)
+            chosen='H02' if base_passes_geometry else 'H01'
+            assert chosen in option_ids
+            if base_passes_geometry:assert 'BASE' in context
             return json.dumps({'decision':self.decision,'fai':9,'source_point_count':3,
-                'candidate_id':'H01','source_pages':[1],'confidence':'medium',
+                'candidate_id':chosen,'source_pages':[1],'confidence':'medium',
                 'evidence':'The complete alternative aligns with the original method.'}),False,80
     def project(_m,_p,frames,_d,_c):
         if frames[0]['rotation']==base['rotation']:
-            return None,{'reason':'base_group_rejected'}
+            if not base_passes_geometry:return None,{'reason':'base_group_rejected'}
         return ([{'face_id':'face','position':[0,0,0]} for _ in points],[],[]),None
     monkeypatch.setattr(local_matching,'_project_model_selected_xyz_group',project)
     monkeypatch.setattr(local_matching,'_refine_model_selected_xyz_frames',lambda _m,_p,f:(f,[]))
@@ -900,6 +1021,71 @@ def test_local_manifest_confirmation_removes_unrelated_family_points_without_bor
         candidate_selection_valid=True,coordinate_choices_valid=True,truncated=False)
     assert any(issue['code']=='source_point_coverage_incomplete'
                and issue['missing_names']==['F2_PNT_Z2'] for issue in issues)
+
+
+def test_complete_confirmed_manifest_with_missing_xyz_can_enter_visual_recovery_without_aliasing():
+    strategy={'next_route':'evidence_repair'}
+    manifest={'status':'confirmed','coordinate_evidence_missing':['R1_PNT_Z3'],
+        'groups':[{'declared_count':1,'source_point_names':['R1_PNT_P2']},
+                  {'declared_count':2,'source_point_names':['S1_PNT_Z1','R1_PNT_Z3']}]}
+    points=[{'name':'R1_PNT_P2','xyz':[-28.96,9.73,2.01],'explicit_method_manifest':True},
+            {'name':'S1_PNT_Z1','xyz':[-30.56,4.43,0.0],'explicit_method_manifest':True},
+            {'name':'R1_PNT_Z3','xyz':None,'explicit_method_manifest':True}]
+    recovery=local_matching._source_relation_visual_recovery(strategy,manifest,points,3)
+    assert recovery['missing_xyz_source_point_names']==['R1_PNT_Z3']
+    assert recovery['source_xyz_substitution_allowed'] is False
+    # Similar retrieved names remain excluded; a direct measured name cannot
+    # inherit their XYZ through this route.
+    assert points[2]['xyz'] is None
+
+
+@pytest.mark.parametrize('points,count', [
+    ([{'name':'R1_PNT_P2','xyz':None,'explicit_method_manifest':True}],1),
+    ([{'name':'R1_PNT_P2','xyz':None,'explicit_method_manifest':True},
+      {'name':'S1_PNT_Z1','xyz':None}],2),
+])
+def test_visual_recovery_requires_every_direct_name_to_be_confirmed(points,count):
+    manifest={'status':'confirmed','coordinate_evidence_missing':[row['name'] for row in points],
+        'groups':[{'declared_count':count,'source_point_names':['R1_PNT_P2','S1_PNT_Z1']}]}
+    assert local_matching._source_relation_visual_recovery(
+        {'next_route':'evidence_repair'},manifest,points,count) is None
+
+
+def test_partial_xyz_evidence_repair_gets_optional_local_host_part_selection():
+    assert local_matching._part_identity_route({'next_route':'evidence_repair',
+        'evidence_class':'partial_xyz'})==(False,True)
+    assert local_matching._part_identity_route({'next_route':'evidence_repair',
+        'evidence_class':'named_features_no_xyz','failure_class':'source_manifest'})==(False,True)
+    assert local_matching._part_identity_route({'next_route':'evidence_repair',
+        'evidence_class':'complete_xyz_single_frame'})==(False,False)
+    assert local_matching._part_identity_route({'next_route':'feature_topology_graph',
+        'evidence_class':'unknown'})==(True,False)
+
+
+def test_entity_review_coordinate_audit_maps_xyz_before_world_comparison():
+    import numpy as np
+    source=[{'name':'P1','xyz':[-28.96,9.73,2.01],
+        'program':'UP','coordinate_system':'ALI_ABC'}]
+    locations=[{'source_point_names':['P1']}]
+    anchors=[{'position':[28.93,9.64,0.098]}]
+    fits={('UP','ALI_ABC'):{'rotation':np.eye(3),'translation':np.array([57.89,-0.09,-1.912]),
+        'max_residual_mm':0.01,'rms_residual_mm':0.005}}
+    audit=local_matching._entity_coordinate_frame_audit(source_points=source,
+        rigid_fits=fits,locations=locations,anchors=anchors)
+    assert audit['status']=='registered_mapping_available'
+    assert audit['raw_source_xyz_comparable_to_cad_world'] is False
+    assert audit['source_xyz_to_cad_xyz'][0]['transformed_xyz']==pytest.approx([28.93,9.64,0.098])
+    assert audit['source_xyz_to_cad_xyz'][0]['position']==anchors[0]['position']
+    assert audit['numeric_comparison_allowed_only_after_transform'] is True
+
+
+def test_entity_review_coordinate_audit_explicitly_marks_unregistered_xyz():
+    audit=local_matching._entity_coordinate_frame_audit(source_points=[{'name':'P1','xyz':[1,2,3],
+        'program':'UP','coordinate_system':'ALI_ABC'}],locations=[{'source_point_names':['P1']}],
+        anchors=[{'position':[4,5,6]}])
+    assert audit['status']=='partial_or_unregistered'
+    assert audit['raw_source_xyz_comparable_to_cad_world'] is False
+    assert audit['source_xyz_to_cad_xyz'][0]['transformed_xyz'] is None
 
 
 def test_manifest_model_cannot_substitute_similar_names_or_authorize_a_partial_list():

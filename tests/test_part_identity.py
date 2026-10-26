@@ -1,6 +1,6 @@
 import json
 from types import SimpleNamespace
-from oracle_viewer.part_identity import cad_parts,select_physical_parts
+from oracle_viewer.part_identity import cad_parts,select_physical_parts,_candidate_geometry_support
 
 
 def mesh():
@@ -15,6 +15,19 @@ def test_catalog_keeps_repeated_original_bodies_and_assembly_positions():
     assert parts[0]['prototype_body']==parts[1]['prototype_body']
     assert parts[0]['bbox_mm']['min']==[0,0,0] and parts[1]['bbox_mm']['min']==[10,0,0]
     assert parts[0]['face_ids']==['left']
+
+
+def test_part_screening_geometry_hints_keep_only_direct_fai_point_names():
+    candidate={'required_marker_groups':[{'source_point_names':['P_DIRECT']}],
+        'evidence':{'point_correspondences':[
+            {'name':'P_DIRECT','source_xyz':[1,2,3],'transformed_xyz':[10,0,0],
+             'position':[10,0,0],'face_id':'right','residual_mm':0.01},
+            {'name':'P_SIMILAR','source_xyz':[1,2,3],'transformed_xyz':[0,0,0],
+             'position':[0,0,0],'face_id':'left','residual_mm':0.01}]}}
+    support=_candidate_geometry_support(mesh(),candidate)
+    assert len(support)==1 and support[0]['name']=='P_DIRECT'
+    assert support[0]['body_id']=='B2'
+    assert support[0]['authority']=='prior_local_model_display_hypothesis_only'
 
 
 def test_only_native_exact_body_selection_is_accepted_and_never_marks_points(tmp_path):
@@ -75,3 +88,17 @@ def test_large_body_catalog_is_screened_completely_without_truncation(tmp_path):
         {'number':4},{'methods':[]},Model(),m,['original-msop.png'])
     assert parts[0]['part_id']=='B1' and len(seen)==69 and len(set(seen))==69
     assert len(audit['screening'])==4 and audit['does_not_authorize_measurement_anchors']
+
+
+def test_unconfirmed_part_screening_persists_failure_evidence_for_downstream_review(tmp_path):
+    m={'source_sha256':'large','faces':[{'id':f'f{i}','body':i,
+        'positions':[i*2,0,0,i*2+1,0,0,i*2,1,0],'indices':[0,1,2]} for i in range(1,70)]}
+    class Model:
+        def _generate_once(self,messages,**kwargs):
+            return json.dumps({'decision':'ABSTAIN','fai':4,'part_ids':[]}),False,40
+    parts,audit=select_physical_parts(SimpleNamespace(_dir=lambda _:tmp_path),{'id':'p'},
+        {'number':4},{'methods':[]},Model(),m,['original-msop.png'])
+    assert parts is None and audit['status']=='unconfirmed'
+    assert audit['receipt'] and (tmp_path/'automatic-learning'/'part-selections').is_dir()
+    saved=json.load(open(audit['receipt']))
+    assert saved['screening'][0]['raw_output'] and saved['does_not_authorize_measurement_anchors']
