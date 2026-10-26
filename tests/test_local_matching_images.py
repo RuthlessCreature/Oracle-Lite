@@ -150,7 +150,9 @@ def test_cloned_source_scoped_candidate_ids_cannot_hide_duplicate_physical_hits(
     duplicate=next(row for row in issues
         if row.get('reason')=='duplicate_physical_surface_for_distinct_markers')
     assert duplicate['source_point_names']==['A01','J01']
-    assert duplicate['selected_candidate_ids']==['C1','C2']
+    assert duplicate['members']==[
+        {'source_point_name':'J01','candidate_id':'C1','view_id':'+Z'},
+        {'source_point_name':'A01','candidate_id':'C2','view_id':'+Z'}]
     assert len([row for row in issues
         if row.get('reason')=='duplicate_physical_surface_for_distinct_markers'])==1
 

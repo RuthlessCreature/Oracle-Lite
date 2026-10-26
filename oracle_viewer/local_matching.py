@@ -657,26 +657,45 @@ def _surface_candidate_selection_audit(parsed, surface_candidates,*,require_mark
         except (TypeError,ValueError):position=None
         if position is None or position.shape!=(3,) or not np.isfinite(position).all():
             position=None
-        selected_hits.append((names,candidate_id,position,marker.get('view_id'),marker.get('uv')))
-    for index,(names,candidate_id,position,view_id,uv) in enumerate(selected_hits):
-        for other_names,other_id,other_position,other_view,other_uv in selected_hits[index+1:]:
-            if names.intersection(other_names):
-                continue
-            same_position=(position is not None and other_position is not None
-                           and float(np.linalg.norm(position-other_position))<1e-5)
-            same_pixel=(position is None and other_position is None and view_id==other_view
-                        and isinstance(uv,list) and len(uv)==2
-                        and isinstance(other_uv,list) and len(other_uv)==2
-                        and np.allclose(uv,other_uv,atol=1e-7,rtol=0))
-            if same_position or same_pixel:
-                issues.append({'field':'markers','source_point_names':sorted(names|other_names),
-                    'selected_candidate_ids':[candidate_id,other_id],
-                    'view_ids':[view_id,other_view],
-                    'reason':'duplicate_physical_surface_for_distinct_markers',
-                    'separation_mm':(float(np.linalg.norm(position-other_position))
-                        if same_position else 0.0)})
-                if len(issues)>=40:
-                    return issues
+        selected_hits.append((names,candidate_id,position,
+            (candidate or {}).get('view_id',marker.get('view_id')),
+            (candidate or {}).get('uv',marker.get('uv'))))
+    duplicate_groups=[]
+    for hit in selected_hits:
+        names,_candidate_id,position,view_id,uv=hit
+        matching=[]
+        for index,group in enumerate(duplicate_groups):
+            overlaps=False
+            for _old_names,_old_id,old_position,old_view,old_uv in group:
+                same_position=(position is not None and old_position is not None
+                               and float(np.linalg.norm(position-old_position))<1e-5)
+                same_pixel=(position is None and old_position is None and view_id==old_view
+                    and isinstance(uv,list) and len(uv)==2
+                    and isinstance(old_uv,list) and len(old_uv)==2
+                    and np.allclose(uv,old_uv,atol=1e-7,rtol=0))
+                if same_position or same_pixel:
+                    overlaps=True;break
+            if overlaps:matching.append(index)
+        if not matching:
+            duplicate_groups.append([hit])
+        else:
+            merged=[*duplicate_groups[matching[0]],hit]
+            for index in reversed(matching[1:]):
+                merged.extend(duplicate_groups.pop(index))
+            duplicate_groups[matching[0]]=merged
+    for group in duplicate_groups:
+        if len(group)<2:
+            continue
+        names=sorted({name for hit in group for name in hit[0]})
+        positions=[hit[2] for hit in group if hit[2] is not None]
+        issues.append({'field':'markers','source_point_names':names,
+            'members':[{'source_point_name':sorted(hit[0])[0],
+                'candidate_id':hit[1],'view_id':hit[3]} for hit in group],
+            'reason':'duplicate_physical_surface_for_distinct_markers',
+            'separation_mm':(float(max(np.linalg.norm(position-positions[0])
+                for position in positions)) if len(positions)>1 else 0.0)})
+        if len(issues)>=40:
+            return issues
     return issues
 
 
