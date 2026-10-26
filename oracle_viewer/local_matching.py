@@ -636,6 +636,47 @@ def _surface_candidate_selection_audit(parsed, surface_candidates,*,require_mark
                         'selected_candidate_id':candidate_id,'valid_candidate_ids':['C'+value for value in allowed]})
                     if len(issues)>=40:
                         return issues
+    # Source-scoped candidate IDs can refer to cloned entries for the same
+    # physical ray hit. Distinct IDs therefore do not prove distinct marker
+    # positions; detect coincident CAD positions while the model can still
+    # repair only the affected source points.
+    selected_hits=[]
+    for marker in parsed.get('markers') or []:
+        if not isinstance(marker,dict):
+            continue
+        names=set(name for name in marker.get('source_point_names') or []
+                  if isinstance(name,str) and name)
+        if not names:
+            continue
+        candidate_id=marker.get('candidate_id',marker.get('candidate'))
+        key=(str(candidate_id).strip().upper().removeprefix('C')
+             if candidate_id is not None else None)
+        candidate=candidates_by_id.get(key) if key else None
+        position=(candidate or {}).get('position')
+        try:position=np.asarray(position,dtype=float)
+        except (TypeError,ValueError):position=None
+        if position is None or position.shape!=(3,) or not np.isfinite(position).all():
+            position=None
+        selected_hits.append((names,candidate_id,position,marker.get('view_id'),marker.get('uv')))
+    for index,(names,candidate_id,position,view_id,uv) in enumerate(selected_hits):
+        for other_names,other_id,other_position,other_view,other_uv in selected_hits[index+1:]:
+            if names.intersection(other_names):
+                continue
+            same_position=(position is not None and other_position is not None
+                           and float(np.linalg.norm(position-other_position))<1e-5)
+            same_pixel=(position is None and other_position is None and view_id==other_view
+                        and isinstance(uv,list) and len(uv)==2
+                        and isinstance(other_uv,list) and len(other_uv)==2
+                        and np.allclose(uv,other_uv,atol=1e-7,rtol=0))
+            if same_position or same_pixel:
+                issues.append({'field':'markers','source_point_names':sorted(names|other_names),
+                    'selected_candidate_ids':[candidate_id,other_id],
+                    'view_ids':[view_id,other_view],
+                    'reason':'duplicate_physical_surface_for_distinct_markers',
+                    'separation_mm':(float(np.linalg.norm(position-other_position))
+                        if same_position else 0.0)})
+                if len(issues)>=40:
+                    return issues
     return issues
 
 
@@ -2553,10 +2594,15 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
             'source_name_aliases':aliases,'contract_issues':issues})
         if not issues and not truncated:return parsed,raw,False,total_tokens,aliases,attempts
         if parsed.get('decision')=='ABSTAIN':break
+        duplicate_surface=any(issue.get('reason')=='duplicate_physical_surface_for_distinct_markers'
+                              for issue in issues)
         current={**base,'content':base['content']+
             '\nYour last subset response failed the output contract. This is a naming/count/candidate check, '
             'not a geometry authorization. Re-read the same original evidence and return the entire corrected '
             'subset with the exact required names. Never invent coordinates or accept a wrong entity. '
+            +('Different source points landed on the same CAD world position; choose candidates with distinct '
+              'verified CAD hit positions, not merely different point-scoped IDs. Preserve the exact marker count. '
+              if duplicate_surface else '')+
             'Use ABSTAIN if evidence is insufficient. Diagnostics: '+json.dumps(issues,ensure_ascii=False)+
             '\nPrevious native response (unaccepted): '+raw}
     return parsed,raw,bool(truncated),total_tokens,aliases,attempts

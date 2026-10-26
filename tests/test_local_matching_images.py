@@ -134,6 +134,27 @@ def test_collapsed_xyz_source_points_cannot_reuse_the_same_view_by_uv_or_candida
     assert not alternate
 
 
+def test_cloned_source_scoped_candidate_ids_cannot_hide_duplicate_physical_hits():
+    choices=[
+        {'id':1,'view_id':'+Z','uv':[.45,.45],'position':[1.0,2.0,3.0],
+         'source_point_names':['J01']},
+        {'id':2,'view_id':'+Z','uv':[.45,.45],'position':[1.0,2.0,3.0],
+         'source_point_names':['A01']},
+        {'id':3,'view_id':'+Z','uv':[.55,.45],'position':[2.0,2.0,3.0],
+         'source_point_names':['J02']},
+    ]
+    parsed={'markers':[{'source_point_names':['J01'],'candidate_id':'C1'},
+                       {'source_point_names':['A01'],'candidate_id':'C2'},
+                       {'source_point_names':['J02'],'candidate_id':'C3'}]}
+    issues=_surface_candidate_selection_audit(parsed,choices,require_marker_ids=True)
+    duplicate=next(row for row in issues
+        if row.get('reason')=='duplicate_physical_surface_for_distinct_markers')
+    assert duplicate['source_point_names']==['A01','J01']
+    assert duplicate['selected_candidate_ids']==['C1','C2']
+    assert len([row for row in issues
+        if row.get('reason')=='duplicate_physical_surface_for_distinct_markers'])==1
+
+
 def test_geometry_recovery_requires_unique_candidate_ids_only_for_points_with_candidates():
     choices=[
         {'id':1,'view_id':'-X','uv':[.31,.62],'source_point_names':['P1']},
