@@ -2434,6 +2434,31 @@ def _source_xy_layout_evidence(source_points,expected_names):
     return evidence
 
 
+def _surface_candidate_geometry_evidence(surface_candidates,expected_names):
+    """Group source-scoped labels by exact physical CAD hit for joint selection."""
+    expected=set(expected_names);positions={}
+    for candidate in surface_candidates or []:
+        candidate_id=candidate.get('id');view_id=candidate.get('view_id')
+        uv=candidate.get('uv');names=expected.intersection(candidate.get('source_point_names') or [])
+        position=candidate.get('position')
+        if candidate_id is None or not names or not isinstance(view_id,str):continue
+        try:xyz=np.asarray(position,dtype=float)
+        except (TypeError,ValueError):continue
+        if xyz.shape!=(3,) or not np.isfinite(xyz).all():continue
+        key=tuple(np.round(xyz,5).tolist())
+        group=positions.setdefault(key,{'cad_xyz_mm':list(key),'views':{}})
+        view=group['views'].setdefault((view_id,tuple(uv) if isinstance(uv,(list,tuple)) else ()),
+            {'view_id':view_id,'uv':list(uv) if isinstance(uv,(list,tuple)) else None,
+             'candidate_ids_by_source_point':{}})
+        for name in names:
+            view['candidate_ids_by_source_point'][name]='C'+str(candidate_id).removeprefix('C')
+    result=[]
+    for key,group in sorted(positions.items()):
+        views=sorted(group['views'].values(),key=lambda row:(row['view_id'],row.get('uv') or []))
+        result.append({'cad_xyz_mm':group['cad_xyz_mm'],'views':views})
+    return result
+
+
 def _explicit_source_point_relations(methods,source_point_names):
     """Read explicit MSOP point-to-point expressions into atomic inference groups."""
     names=set(name for name in source_point_names if isinstance(name,str) and name)
@@ -2632,6 +2657,7 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
         for name in expected_names}
     blocked={name:views for name,views in blocked.items() if views}
     source_xy_layout=_source_xy_layout_evidence(source_points,expected_names)
+    candidate_geometry=_surface_candidate_geometry_evidence(surface_candidates,expected_names)
     contract=('\nCurrent subset output contract: markers must cover ONLY '+json.dumps(expected_names)+
         ', each name exactly once. Do not add a point from another subset to close a loop or build a plane. '+
         'Full-group totals in the source apply after the service merges all subsets. '+
@@ -2646,7 +2672,13 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
          'axis reversal when the drawing/CAD axes differ. Select all point candidates together; do not map each '
          'point independently to a convenient central hit. For documented equal-XY Z-distance pairs, keep the '
          'two selected hits aligned in-plane but on distinct supported CAD surfaces. These XY rows do not provide Z. '
-         if source_xy_layout else ''))
+         if source_xy_layout else '')+
+        ('Exact CAD candidate geometry (ray-hit positions in CAD mm; IDs are scoped to the source point, and '
+         'equal XYZ rows are the same physical hit regardless of view): '+
+         json.dumps(candidate_geometry,ensure_ascii=False,separators=(',',':'))+'. Select a one-to-one mapping '
+         'from this table that best matches the source drawing and the complete MSOP point layout. Candidate geometry '
+         'is search evidence; the full geometry and measurement gates still decide acceptance. '
+         if candidate_geometry else ''))
     base={**message,'content':message['content']+contract}
     current=base;attempts=[];total_tokens=0;last_issues=[]
     for index in range(max_repairs+1):
@@ -2674,6 +2706,12 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
                       'common in-plane rigid transform and keeping documented equal-XY Z pairs on distinct supported '
                       'surfaces: '+json.dumps(source_xy_layout,ensure_ascii=False,separators=(',',':'))+'. XY does '
                       'not supply Z.') if source_xy_layout else ''))
+                if candidate_geometry:
+                    compact['content']+=(
+                        ' Exact shared CAD hit table with per-point IDs and XYZ mm: '+json.dumps(
+                            candidate_geometry,ensure_ascii=False,separators=(',',':'))+
+                        '. Choose a joint mapping; IDs at the same XYZ are one physical hit and cannot mark '
+                        'two distinct measured locations.')
                 request_messages=[compact]
                 request_budget=_complete_visual_context_budget(request_messages)
                 current=compact

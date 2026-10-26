@@ -183,6 +183,31 @@ def test_source_xy_layout_evidence_keeps_literal_coordinates_and_pair_distances(
         'pairwise_xy_distances':[{'points':['A01','J01'],'xy_distance_mm':0.0}]}]
 
 
+def test_surface_candidate_geometry_groups_point_scoped_ids_by_physical_hit():
+    candidates=[
+        {'id':1,'view_id':'+Z','uv':[.4,.5],'position':[1.,2.,3.],
+         'source_point_names':['J01']},
+        {'id':7,'view_id':'+Z','uv':[.4,.5],'position':[1.,2.,3.],
+         'source_point_names':['A01']},
+        {'id':2,'view_id':'-Z','uv':[.6,.5],'position':[1.,2.,3.],
+         'source_point_names':['J01']},
+        {'id':8,'view_id':'-Z','uv':[.6,.5],'position':[1.,2.,3.],
+         'source_point_names':['A01']},
+        {'id':3,'view_id':'+Z','uv':[.8,.2],'position':[4.,5.,6.],
+         'source_point_names':['J01']},
+    ]
+    evidence=local_matching._surface_candidate_geometry_evidence(candidates,['J01','A01'])
+    assert evidence==[
+        {'cad_xyz_mm':[1.,2.,3.],'views':[
+            {'view_id':'+Z','uv':[.4,.5],
+             'candidate_ids_by_source_point':{'J01':'C1','A01':'C7'}},
+            {'view_id':'-Z','uv':[.6,.5],
+             'candidate_ids_by_source_point':{'J01':'C2','A01':'C8'}}]},
+        {'cad_xyz_mm':[4.,5.,6.],'views':[
+            {'view_id':'+Z','uv':[.8,.2],
+             'candidate_ids_by_source_point':{'J01':'C3'}}]}]
+
+
 def test_duplicate_surface_retry_increases_temperature_and_uses_alternative_hits():
     candidates=[
         {'id':1,'view_id':'+Z','uv':[.45,.45],'position':[1.,2.,3.],'source_point_names':['J01']},
@@ -219,6 +244,8 @@ def test_duplicate_surface_retry_increases_temperature_and_uses_alternative_hits
     assert [row['candidate_id'] for row in parsed['markers']]==['C3','C4']
     assert model.temperatures==[0.0,0.18]
     assert 'pairwise_xy_distances' in model.messages[0]
+    assert 'candidate_ids_by_source_point' in model.messages[0]
+    assert 'equal XYZ rows are the same physical hit' in model.messages[0]
     assert 'Use the per-point alternative' in model.messages[1]
     assert 'common in-plane rigid transform' in model.messages[1]
     assert attempts[0]['contract_issues'][0]['members'][0]['alternative_candidates'][0]['candidate_id']=='C3'
