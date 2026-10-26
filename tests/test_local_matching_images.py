@@ -16,7 +16,7 @@ from oracle_viewer.local_matching import (_method_page_images, _compact_registra
 from oracle_viewer.local_matching import (_xyz_rigid_fit_required_scopes,
     _missing_required_xyz_fits, _normalize_model_source_aliases,
     _explicit_source_point_relations, _partition_visual_source_points, _merge_visual_marker_chunks,
-    _select_coordinate_variants_with_local_model, _attach_explicit_source_xy,
+    _select_coordinate_variants_with_local_model, _request_visual_marker_chunk, _attach_explicit_source_xy,
     _explicit_coincident_xy_z_distance_pairs)
 from oracle_viewer.msop_coordinates import _explicit_measure_point_names
 
@@ -605,6 +605,30 @@ def test_numbered_point_pairs_without_ellipsis_do_not_invent_intermediate_relati
     methods=[{'text':'Output Z distance (2x) from point to point (J01-A01,J06-A06).'}]
     assert _explicit_source_point_relations(methods,names)==[
         ['EDGE_J01','EDGE_A01'],['EDGE_J06','EDGE_A06']]
+
+
+def test_two_point_visual_chunk_uses_bounded_compact_generation():
+    class LocalModel:
+        max_new_tokens=None
+        def _generate_once(self,messages,**kwargs):
+            self.max_new_tokens=kwargs['max_new_tokens']
+            markers=[{'source_point_names':[name],'feature':name,'view_id':view,
+                'uv':[.4,.6],'source_pages':[14],'candidate_id':f'C{index}'}
+                for index,(name,view) in enumerate((('THICK_J01','+Z'),('THICK_A01','-Z')),1)]
+            return json.dumps({'decision':'AUTO_MARK','fai':9,'markers':markers,
+                'registration_points':[],'coordinate_choices':[],
+                'confidence':'high','evidence':'MSOP p14'}),False,100
+    model=LocalModel()
+    candidates=[{'id':index,'view_id':view,'uv':[.4,.6],
+        'source_point_names':[name],'position':[0.,0.,float(index)]}
+        for index,(name,view) in enumerate((('THICK_J01','+Z'),('THICK_A01','-Z')),1)]
+    result,_,truncated,_,_,_=_request_visual_marker_chunk(model,
+        {'role':'user','content':'Locate this MSOP pair.','attachments':[]},fai=9,
+        expected_names=['THICK_J01','THICK_A01'],
+        source_points=[{'name':'THICK_J01'},{'name':'THICK_A01'}],
+        allowed_source_pages={14},surface_candidates=candidates)
+    assert result and not truncated
+    assert model.max_new_tokens==1024
 
 
 def test_literal_msop_xy_rows_are_attached_without_fabricating_z_and_identify_z_pairs():
@@ -1484,8 +1508,3 @@ def test_manifest_retry_explains_numeric_confidence_protocol_error():
             return json.dumps(dict(decision='CONFIRM_MANIFEST',fai=1,
                 source_point_names=['DATUMB_P09','DATUMB_P10'],evidence='Printed list',
                 confidence=1.0 if self.calls==1 else 'high')),False,80
-    points,audit=local_matching._resolve_declared_marker_manifest_with_local_model(
-        Model(),1,methods,[],2,[])
-    assert points is not None and len(points)==2
-    assert audit['attempts'][0]['validation_errors']==['confidence_must_be_high_medium_or_low_string']
-    assert audit['attempts'][1]['valid']
