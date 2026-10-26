@@ -2497,6 +2497,7 @@ def _exclude_reserved_surface_positions(surface_candidates,reserved_positions,*,
 
 def _explicit_source_point_relations(methods,source_point_names):
     """Read explicit MSOP point-to-point expressions into atomic inference groups."""
+    source_point_names=list(source_point_names)
     names=set(name for name in source_point_names if isinstance(name,str) and name)
     if len(names)<2:return []
     def resolve(token):
@@ -2507,12 +2508,40 @@ def _explicit_source_point_relations(methods,source_point_names):
                             r'([A-Za-z][A-Za-z0-9_]{0,40})(?![A-Za-z0-9_])')
     for method in methods or []:
         text=method.get('text','') if isinstance(method,dict) else str(method)
+        method_relations=[]
         for left,right in pair_pattern.findall(text):
             a,b=resolve(left),resolve(right)
             pair=tuple((a,b)) if a and b and a!=b else None
             if pair and pair not in seen:
-                seen.add(pair);relations.append(list(pair))
-    return relations
+                seen.add(pair);relations.append(list(pair));method_relations.append(pair)
+        # Some MSOP templates compress repeated point-to-point pairs as
+        # ``J01-A01, J02-A02 ... J06-A06``. Expand only when the source has an
+        # explicit ellipsis, at least two numbered endpoint pairs establish
+        # both naming families, and every generated endpoint exists in this
+        # FAI's source point list. This preserves source identity without
+        # guessing unreferenced or missing point names.
+        if re.search(r'(?:\.{3,}|…+|⋯+)',text) and re.search(
+                r'\b(?:distance|measure)\b',text,re.I):
+            numbered=[]
+            for a,b in method_relations:
+                left_match=re.fullmatch(r'(.+?)(\d+)',a)
+                right_match=re.fullmatch(r'(.+?)(\d+)',b)
+                if (left_match and right_match and left_match.group(2)==right_match.group(2)
+                        and left_match.group(1)!=right_match.group(1)):
+                    numbered.append((left_match.group(1),right_match.group(1),
+                        len(left_match.group(2)),int(left_match.group(2))))
+            families={(left,right,width) for left,right,width,_ in numbered}
+            if len(numbered)>=2 and len(families)==1:
+                left_prefix,right_prefix,width=next(iter(families))
+                first=min(index for _,_,_,index in numbered)
+                last=max(index for _,_,_,index in numbered)
+                for index in range(first,last+1):
+                    pair=(f'{left_prefix}{index:0{width}d}',
+                          f'{right_prefix}{index:0{width}d}')
+                    if pair[0] in names and pair[1] in names and pair not in seen:
+                        seen.add(pair);relations.append(list(pair))
+    source_order={name:index for index,name in enumerate(source_point_names)}
+    return sorted(relations,key=lambda pair:source_order.get(pair[0],len(source_order)))
 
 
 def _partition_visual_source_points(source_points, *, required_marker_groups=None,
@@ -3750,7 +3779,11 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
         required_marker_groups=required_marker_groups,
         related_point_groups=_explicit_source_point_relations(
             detail.get('methods',[]),[point.get('name') for point in known_source_points]),
-        chunk_size=6 if candidate_required_source_names else 10,
+        # Keep explicit same-XY Z-distance pairs atomic and isolated. A wider
+        # chunk encourages the vision model to collapse several distinct
+        # measurement XY locations onto one convenient pair of CAD hits.
+        chunk_size=(2 if coincident_xy_z_pairs else
+                    6 if candidate_required_source_names else 10),
         threshold=0)
         if required_marker_count==len(known_source_points) else [])
     visual_chunk_audit=[]
