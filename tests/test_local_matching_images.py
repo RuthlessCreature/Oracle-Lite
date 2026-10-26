@@ -69,9 +69,10 @@ def test_validation_diagnostic_name_extraction_is_exact_and_nested():
     names=local_matching._diagnostic_source_point_names([
         {'code':'candidate_id_selection_invalid','details':[
             {'source_point_name':'CWS_S01'},{'source_point_name':'CWS_NOT_A_POINT'}]},
+        {'code':'registration_reference_audit_failed','details':{'point':'CWS_S02'}},
         {'code':'source_point_coverage_incomplete','missing_names':['CWS_N14']}],
-        ['CWS_S01','CWS_N14'])
-    assert names=={'CWS_S01','CWS_N14'}
+        ['CWS_S01','CWS_S02','CWS_N14'])
+    assert names=={'CWS_S01','CWS_S02','CWS_N14'}
 
 
 def test_visual_chunk_compacts_prompt_on_budget_error_without_truncating_source_evidence():

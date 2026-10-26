@@ -2404,7 +2404,7 @@ def _diagnostic_source_point_names(rows,known_names):
             for child in value:visit(child,key)
         elif isinstance(value,str) and key in {
             'source_point_name','source_point_names','missing_names','missing_source_points',
-            'invalid_source_points','point_name','point_names'}:
+            'invalid_source_points','point_name','point_names','point'}:
             if value in known:found.add(value)
     visit(rows)
     return found
