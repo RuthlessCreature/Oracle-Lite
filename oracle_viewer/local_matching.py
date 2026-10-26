@@ -2706,7 +2706,7 @@ def _diagnostic_source_point_names(rows,known_names):
 
 
 def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_points,
-        allowed_source_pages,surface_candidates=(),temperature=0.,max_repairs=2):
+                                 allowed_source_pages,surface_candidates=(),temperature=0.,max_repairs=2):
     """Ask the native model to repair only a malformed subset response.
 
     A genuine abstention stays an abstention. No valid neighboring chunks are
@@ -2745,6 +2745,10 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
          'is search evidence; the full geometry and measurement gates still decide acceptance. '
          if candidate_geometry else ''))
     base={**message,'content':message['content']+contract}
+    # Candidate selection is a compact structured decision. Bound generation
+    # by subset size so verbose reasoning cannot consume the full 4096-token
+    # budget for a two-point pair; truncated outputs remain safely rejected.
+    max_new_tokens=min(2048,max(1024,256*len(expected_names)))
     current=base;attempts=[];total_tokens=0;last_issues=[]
     for index in range(max_repairs+1):
         try:
@@ -2783,7 +2787,7 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
             repair_temperature=min(.55,temperature+.18*index)
             raw,truncated,tokens=model._generate_once(request_messages,
                 max_context_chars=request_budget,
-                max_new_tokens=4096,max_images=8,temperature=repair_temperature)
+                max_new_tokens=max_new_tokens,max_images=8,temperature=repair_temperature)
         except Exception as exc:
             attempts.append({'error':f'{type(exc).__name__}: {exc}'[:1000]})
             return None,'',True,total_tokens,[],attempts
@@ -3836,7 +3840,8 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                     "coordinate-frame, rigid-fit, and CAD ray-hit gates. Do not reduce or reinterpret the MSOP group. "
                     f"For coordinate variants, return exact coordinate_choices only for these names: {json.dumps(chunk_ambiguous,ensure_ascii=False)}. "
                     "registration_points may be empty in this chunk; the complete merged marker correspondences will "
-                    "be checked together. Keep the usual JSON fields and cite the MSOP pages for this FAI.")
+                    "be checked together. Return compact valid JSON only, with no prose or chain-of-thought; use one short "
+                    "evidence sentence. Keep the usual JSON fields and cite the MSOP pages for this FAI.")
                 chunk_attachments=messages[0].get('attachments',[])
                 if surface_candidates:
                     source_images=[path for path in images
