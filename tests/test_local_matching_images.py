@@ -146,6 +146,8 @@ def test_cloned_source_scoped_candidate_ids_cannot_hide_duplicate_physical_hits(
          'source_point_names':['J01']},
         {'id':5,'view_id':'-Y','uv':[.55,.45],'position':[3.0,2.0,3.0],
          'source_point_names':['A01']},
+        {'id':6,'view_id':'-X','uv':[.65,.45],'position':[2.5,2.0,3.0],
+         'source_point_names':['J01']},
     ]
     parsed={'markers':[{'source_point_names':['J01'],'candidate_id':'C1'},
                        {'source_point_names':['A01'],'candidate_id':'C2'},
@@ -156,7 +158,7 @@ def test_cloned_source_scoped_candidate_ids_cannot_hide_duplicate_physical_hits(
     assert duplicate['source_point_names']==['A01','J01']
     assert duplicate['members']==[
         {'source_point_name':'J01','candidate_id':'C1','view_id':'+Z',
-         'alternative_candidate_ids':['C4']},
+         'alternative_candidate_ids':['C4','C6']},
         {'source_point_name':'A01','candidate_id':'C2','view_id':'+Z',
          'alternative_candidate_ids':['C5']}]
     assert len([row for row in issues

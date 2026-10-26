@@ -691,14 +691,13 @@ def _surface_candidate_selection_audit(parsed, surface_candidates,*,require_mark
         members=[]
         for hit_names,candidate_id,_position,view_id,_uv in group:
             name=sorted(hit_names)[0]
-            alternatives=[];seen_views=set()
+            alternatives=[];seen_positions=[]
             selected_key=str(candidate_id).upper().removeprefix('C')
             for alternative_id in sorted(candidate_sources.get(name,set()),
                     key=lambda value:(not value.isdigit(),int(value) if value.isdigit() else value)):
                 if alternative_id==selected_key:
                     continue
                 alternative=candidates_by_id.get(alternative_id) or {}
-                alternative_view=alternative.get('view_id')
                 alternative_position=alternative.get('position')
                 try:alternative_position=np.asarray(alternative_position,dtype=float)
                 except (TypeError,ValueError):alternative_position=None
@@ -707,11 +706,12 @@ def _surface_candidate_selection_audit(parsed, surface_candidates,*,require_mark
                         or any(np.linalg.norm(alternative_position-position)<1e-5
                                for position in positions)):
                     continue
-                if alternative_view in seen_views:
+                if any(np.linalg.norm(alternative_position-position)<1e-5
+                       for position in seen_positions):
                     continue
-                seen_views.add(alternative_view)
+                seen_positions.append(alternative_position)
                 alternatives.append('C'+alternative_id)
-                if len(alternatives)>=6:
+                if len(alternatives)>=12:
                     break
             members.append({'source_point_name':name,'candidate_id':candidate_id,
                 'view_id':view_id,'alternative_candidate_ids':alternatives})
