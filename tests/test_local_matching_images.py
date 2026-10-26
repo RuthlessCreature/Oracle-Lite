@@ -577,7 +577,7 @@ def test_explicit_msop_point_pairs_stay_together_when_large_group_is_chunked():
         ['THICK_J06','THICK_A06']]
 
 
-def test_explicit_xy_coincident_z_pairs_can_be_isolated_for_geometry_decisions():
+def test_explicit_xy_coincident_z_pairs_pack_three_plan_locations_per_decision():
     names=[*(f'THICK_J{i:02}' for i in range(1,7)),
            *(f'THICK_A{i:02}' for i in range(1,7))]
     methods=[{'text':'Output Z distance (6x) from point to point '
@@ -585,9 +585,10 @@ def test_explicit_xy_coincident_z_pairs_can_be_isolated_for_geometry_decisions()
     pairs=_explicit_source_point_relations(methods,names)
     chunks=_partition_visual_source_points([{'name':name} for name in names],
         required_marker_groups=[{'source_point_names':names}],related_point_groups=pairs,
-        chunk_size=2,threshold=0)
+        chunk_size=6,threshold=0)
     assert [[point['name'] for point in chunk] for chunk in chunks]==[
-        [f'THICK_J{i:02}',f'THICK_A{i:02}'] for i in range(1,7)]
+        [name for i in range(start,start+3) for name in (f'THICK_J{i:02}',f'THICK_A{i:02}')]
+        for start in (1,4)]
 
 
 def test_numbered_point_pairs_are_expanded_only_across_source_ellipsis():
