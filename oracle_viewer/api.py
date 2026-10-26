@@ -627,7 +627,7 @@ def attach_viewer(app, state):
                    'cad': (data.get('model') or {}).get('source_sha256'), 'candidates': candidates,
                    # Bump when candidate search/acceptance behavior changes so a
                    # completed run cannot suppress retries under a newer engine.
-                   'automation_ruleset_revision': 53,
+                   'automation_ruleset_revision': 64,
                    'coverage': marker_coverage(store.items(data)),
                    'registration_receipt':hashlib.sha256(registration.read_bytes()).hexdigest() if registration.is_file() else None,
                    'registration_alternatives':[(p.name,hashlib.sha256(p.read_bytes()).hexdigest()) for p in
