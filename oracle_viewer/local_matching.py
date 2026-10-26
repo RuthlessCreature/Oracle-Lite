@@ -2459,6 +2459,42 @@ def _surface_candidate_geometry_evidence(surface_candidates,expected_names):
     return result
 
 
+def _selected_surface_candidate_positions(parsed,surface_candidates):
+    """Resolve selected point-scoped IDs to their exact CAD hit coordinates."""
+    by_id={str(row.get('id')).strip().upper().removeprefix('C'):row
+        for row in surface_candidates or [] if isinstance(row,dict) and row.get('id') is not None}
+    selected=[]
+    for marker in (parsed or {}).get('markers',[]) if isinstance(parsed,dict) else []:
+        if not isinstance(marker,dict):continue
+        candidate_id=marker.get('candidate_id',marker.get('candidate'))
+        if candidate_id is None:continue
+        row=by_id.get(str(candidate_id).strip().upper().removeprefix('C'))
+        if row is None:continue
+        try:position=np.asarray(row.get('position'),dtype=float)
+        except (TypeError,ValueError):continue
+        if position.shape==(3,) and np.isfinite(position).all():selected.append(position)
+    return selected
+
+
+def _exclude_reserved_surface_positions(surface_candidates,reserved_positions,*,tolerance_mm=1e-5):
+    """Exclude exact CAD hits already assigned to earlier chunks of the same FAI."""
+    reserved=[]
+    for position in reserved_positions or []:
+        try:row=np.asarray(position,dtype=float)
+        except (TypeError,ValueError):continue
+        if row.shape==(3,) and np.isfinite(row).all():reserved.append(row)
+    if not reserved:return list(surface_candidates or [])
+    output=[]
+    for candidate in surface_candidates or []:
+        try:position=np.asarray(candidate.get('position'),dtype=float)
+        except (AttributeError,TypeError,ValueError):position=None
+        if position is not None and position.shape==(3,) and np.isfinite(position).all() and any(
+                float(np.linalg.norm(position-old))<tolerance_mm for old in reserved):
+            continue
+        output.append(candidate)
+    return output
+
+
 def _explicit_source_point_relations(methods,source_point_names):
     """Read explicit MSOP point-to-point expressions into atomic inference groups."""
     names=set(name for name in source_point_names if isinstance(name,str) and name)
@@ -3729,14 +3765,26 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
             # still run after the merge.
             chunk_results=[];chunk_raw=[];chunk_trace=[];tokens=0;truncated=False
             ambiguous_names=set(ambiguous_coordinate_points)
+            reserved_surface_positions=[]
             for chunk_index,chunk in enumerate(visual_point_chunks):
                 chunk_names=[point['name'] for point in chunk]
+                chunk_surface_candidates=_exclude_reserved_surface_positions(
+                    surface_candidates,reserved_surface_positions)
                 if chunk_index in visual_chunk_cache:
                     cached=visual_chunk_cache[chunk_index]
-                    chunk_results.append(cached)
-                    chunk_trace.append({'chunk':chunk_index+1,'source_point_names':chunk_names,
-                        'reused_validated_chunk':True,'parsed_output':cached})
-                    continue
+                    cached_positions=_selected_surface_candidate_positions(cached,surface_candidates)
+                    conflicts=any(float(np.linalg.norm(position-reserved))<1e-5
+                        for position in cached_positions for reserved in reserved_surface_positions)
+                    if not conflicts:
+                        chunk_results.append(cached)
+                        reserved_surface_positions.extend(cached_positions)
+                        chunk_trace.append({'chunk':chunk_index+1,'source_point_names':chunk_names,
+                            'reused_validated_chunk':True,'parsed_output':cached})
+                        continue
+                    # A chunk can be individually valid yet collide with an
+                    # earlier chunk's exact CAD hit. Reopen only this chunk
+                    # with those physical hits removed from its candidate set.
+                    visual_chunk_cache.pop(chunk_index,None)
                 chunk_ambiguous=(sorted(ambiguous_names.intersection(chunk_names))
                                  if not preselected_coordinate_choices else [])
                 update_progress=getattr(store,'update_local_model_marking',None)
@@ -3764,7 +3812,7 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                         Path(path).name))
                     point_candidate_images=[]
                     for point_name in chunk_names:
-                        point_candidates=[row for row in surface_candidates
+                        point_candidates=[row for row in chunk_surface_candidates
                             if point_name in (row.get('source_point_names') or [])]
                         if not point_candidates:
                             continue
@@ -3793,7 +3841,7 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                         _request_visual_marker_chunk(model,chunk_message,fai=item['number'],
                             expected_names=chunk_names,source_points=[point for point in known_source_points
                                 if point.get('name') in chunk_names],
-                            allowed_source_pages=allowed_source_pages,surface_candidates=surface_candidates,
+                            allowed_source_pages=allowed_source_pages,surface_candidates=chunk_surface_candidates,
                             temperature=min(.35,.12*attempt)))
                 except Exception as exc:
                     chunk_results.append(None)
@@ -3810,12 +3858,14 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                     'parsed_output':chunk_parsed,'subset_repair_attempts':repair_audit})
                 if not chunk_truncated and not _visual_chunk_contract_issues(
                         chunk_parsed,chunk_names,fai=item['number'],
-                        surface_candidates=surface_candidates,
+                        surface_candidates=chunk_surface_candidates,
                         require_candidate_ids=candidate_required_source_names):
                     host_issues=_candidate_host_selection_audit(
-                        chunk_parsed,surface_candidates,allowed_face_ids_by_source_name)
+                        chunk_parsed,chunk_surface_candidates,allowed_face_ids_by_source_name)
                     if not host_issues:
                         visual_chunk_cache[chunk_index]=chunk_parsed
+                        reserved_surface_positions.extend(_selected_surface_candidate_positions(
+                            chunk_parsed,chunk_surface_candidates))
             parsed_chunks=_merge_visual_marker_chunks(
                 chunk_results,[[point['name'] for point in chunk] for chunk in visual_point_chunks],
                 fai=item['number'])

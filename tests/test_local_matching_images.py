@@ -208,6 +208,19 @@ def test_surface_candidate_geometry_groups_point_scoped_ids_by_physical_hit():
              'candidate_ids_by_source_point':{'J01':'C3'}}]}]
 
 
+def test_later_visual_chunks_cannot_reuse_reserved_cad_hit_positions():
+    candidates=[
+        {'id':1,'view_id':'+Z','position':[1.,2.,3.],'source_point_names':['P1']},
+        {'id':2,'view_id':'-Z','position':[1.,2.,3.000001],'source_point_names':['P2']},
+        {'id':3,'view_id':'+Z','position':[4.,5.,6.],'source_point_names':['P2']},
+    ]
+    parsed={'markers':[{'source_point_names':['P1'],'candidate_id':'C1'}]}
+    reserved=local_matching._selected_surface_candidate_positions(parsed,candidates)
+    assert len(reserved)==1 and reserved[0].tolist()==[1.,2.,3.]
+    remaining=local_matching._exclude_reserved_surface_positions(candidates,reserved)
+    assert [row['id'] for row in remaining]==[3]
+
+
 def test_duplicate_surface_retry_increases_temperature_and_uses_alternative_hits():
     candidates=[
         {'id':1,'view_id':'+Z','uv':[.45,.45],'position':[1.,2.,3.],'source_point_names':['J01']},
