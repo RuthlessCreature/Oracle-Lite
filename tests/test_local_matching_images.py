@@ -577,6 +577,36 @@ def test_explicit_msop_point_pairs_stay_together_when_large_group_is_chunked():
         ['THICK_J06','THICK_A06']]
 
 
+def test_explicit_xy_coincident_z_pairs_can_be_isolated_for_geometry_decisions():
+    names=[*(f'THICK_J{i:02}' for i in range(1,7)),
+           *(f'THICK_A{i:02}' for i in range(1,7))]
+    methods=[{'text':'Output Z distance (6x) from point to point '
+        '(J01-A01,J02-A02,J03-A03,J04-A04,J05-A05,J06-A06).'}]
+    pairs=_explicit_source_point_relations(methods,names)
+    chunks=_partition_visual_source_points([{'name':name} for name in names],
+        required_marker_groups=[{'source_point_names':names}],related_point_groups=pairs,
+        chunk_size=2,threshold=0)
+    assert [[point['name'] for point in chunk] for chunk in chunks]==[
+        [f'THICK_J{i:02}',f'THICK_A{i:02}'] for i in range(1,7)]
+
+
+def test_numbered_point_pairs_are_expanded_only_across_source_ellipsis():
+    names=[*(f'EDGE_J{i:02}' for i in range(1,7)),
+           *(f'EDGE_A{i:02}' for i in range(1,7))]
+    methods=[{'text':'Output Z distance (6x) from point to point '
+        '(J01-A01,J02-A02……J06-A06).'}]
+    assert _explicit_source_point_relations(methods,names)==[
+        [f'EDGE_J{i:02}',f'EDGE_A{i:02}'] for i in range(1,7)]
+
+
+def test_numbered_point_pairs_without_ellipsis_do_not_invent_intermediate_relations():
+    names=[*(f'EDGE_J{i:02}' for i in range(1,7)),
+           *(f'EDGE_A{i:02}' for i in range(1,7))]
+    methods=[{'text':'Output Z distance (2x) from point to point (J01-A01,J06-A06).'}]
+    assert _explicit_source_point_relations(methods,names)==[
+        ['EDGE_J01','EDGE_A01'],['EDGE_J06','EDGE_A06']]
+
+
 def test_literal_msop_xy_rows_are_attached_without_fabricating_z_and_identify_z_pairs():
     method={'page':14,'text':'''Output system ALI_ABC
 Features X Y
