@@ -111,6 +111,7 @@ def build_domain(
         "records": result.records,
         "text_records": result.text_records,
         "visual_records": result.visual_records,
+        "qa_records": result.qa_records,
         "characters": result.characters,
         "shards": [str(p) for p in result.shard_paths],
     }))
@@ -150,6 +151,7 @@ def prepare(
         "records": dataset.records,
         "text_records": dataset.text_records,
         "visual_records": dataset.visual_records,
+        "qa_records": dataset.qa_records,
         "characters": dataset.characters,
     }))
 
@@ -171,6 +173,19 @@ def train(
     snapshot_id: str = typer.Argument(..., help="Prepared snapshot to train"),
     config: Path = typer.Option(Path("oracle.yaml")),
     max_steps: int | None = typer.Option(None, help="Optional smoke-test cap"),
+    instruction_only: bool = typer.Option(False, help="Train verified instruction records only"),
+    instruction_data: Path | None = typer.Option(None, help="Additional instruction JSONL, frozen per run"),
+    gradient_accumulation_steps: int | None = typer.Option(None, help="Override accumulation for controlled experiments"),
+    learning_rate: float | None = typer.Option(None),
+    num_train_epochs: float | None = typer.Option(None),
+    base_model_path: Path | None = typer.Option(
+        None, help="Optional complete local model directory for controlled base-model comparisons"
+    ),
+    text_max_length: int | None = typer.Option(
+        None, min=384, max=16384,
+        help="Override the no-truncation text token budget for long verified samples",
+    ),
+    initial_adapter: Path | None = typer.Option(None, help="Continue weights from a compatible local adapter"),
 ):
     """Manual snapshot training with the same auto-opened Web console."""
     cfg = load_config(config)
@@ -194,6 +209,14 @@ def train(
             cfg,
             snapshot_id=snapshot_id,
             max_steps=max_steps,
+            instruction_only=instruction_only,
+            instruction_data=instruction_data,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            learning_rate=learning_rate,
+            num_train_epochs=num_train_epochs,
+            base_model_path=base_model_path,
+            text_max_length=text_max_length,
+            initial_adapter=initial_adapter,
             monitor=monitor,
         )
         monitor.finish(status="completed", label="Training completed")

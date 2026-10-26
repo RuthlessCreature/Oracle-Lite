@@ -1,0 +1,1046 @@
+{
+  "schema": "oracle-coordinate-frame-calibration-v1",
+  "drawing": "613-13599",
+  "revision": "06",
+  "units": "mm",
+  "cad_sha256": "ec5e3a7adacd605ebe88958a9aa329e819e26a23ffbad6798a244b59a6385b40",
+  "msop_sha256": "20bafe3e7aa1690909d8b53f11ec5205dedf648c0d8c74d3b2211dcb83145f93",
+  "calibration_basis": "Empirically screened against named MSOP location definitions and the decoded CAD display mesh for this sample only. This is input data, not a transform rule for other projects.",
+  "max_xy_residual_mm": 0.35,
+  "min_inlier_ratio": 0.5,
+  "min_inliers": 2,
+  "same_source_z_tolerance_mm": 0.001,
+  "common_face_min_coverage": 0.9,
+  "z_mapping": null,
+  "z_mapping_note": "ALI_* source Z is preserved for same-level measurement grouping. No validated source-to-CAD Z transform is available; never copy source Z into CAD coordinates.",
+  "hypotheses": [
+    {
+      "name": "D52 ALI_ITER/ALI_ABD to CAD: X mirror, Y unchanged",
+      "systems": [
+        "ALI_ITER",
+        "ALI_ABD"
+      ],
+      "x_sign": -1,
+      "y_sign": 1,
+      "x_offset_mm": 0,
+      "y_offset_mm": 0
+    },
+    {
+      "name": "D52 ALI_ABC family to CAD: X mirror, Y offset -64.5 mm",
+      "systems": [
+        "ALI_ABC",
+        "ALI_ABC_A"
+      ],
+      "x_sign": -1,
+      "y_sign": 1,
+      "x_offset_mm": 0,
+      "y_offset_mm": -64.5
+    }
+  ],
+  "rigid_frame_proposals": [
+    {
+      "frame": "ALI_ITER",
+      "correspondences": [
+        {
+          "name": "DATUMA_R48",
+          "source_xyz": [
+            -6.3,
+            64.12,
+            0.0
+          ],
+          "cad_xyz": [
+            6.30000114440918,
+            64.12000274658203,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R01",
+          "source_xyz": [
+            0.0,
+            64.12,
+            0.0
+          ],
+          "cad_xyz": [
+            -1.1682510375976562e-05,
+            64.1199951171875,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R33",
+          "source_xyz": [
+            -30.56,
+            -42.0,
+            0.0
+          ],
+          "cad_xyz": [
+            30.559999465942383,
+            -41.999996185302734,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R02",
+          "source_xyz": [
+            6.3,
+            64.12,
+            0.0
+          ],
+          "cad_xyz": [
+            -6.299999713897705,
+            64.12000274658203,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R34",
+          "source_xyz": [
+            -30.56,
+            -31.5,
+            0.0
+          ],
+          "cad_xyz": [
+            30.560001373291016,
+            -31.500017166137695,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R03",
+          "source_xyz": [
+            12.6,
+            64.12,
+            0.0
+          ],
+          "cad_xyz": [
+            -12.599995613098145,
+            64.12000274658203,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R35",
+          "source_xyz": [
+            -30.04,
+            -21.0,
+            0.0
+          ],
+          "cad_xyz": [
+            30.04000473022461,
+            -21.000080108642578,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R04",
+          "source_xyz": [
+            19.07,
+            64.12,
+            0.0
+          ],
+          "cad_xyz": [
+            -19.06999969482422,
+            64.12000274658203,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R36",
+          "source_xyz": [
+            -30.04,
+            -10.5,
+            0.0
+          ],
+          "cad_xyz": [
+            30.03999900817871,
+            -10.500083923339844,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R05",
+          "source_xyz": [
+            23.56,
+            63.89,
+            0.0
+          ],
+          "cad_xyz": [
+            -23.559999465942383,
+            63.88999938964844,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R37",
+          "source_xyz": [
+            -30.56,
+            0.0,
+            0.0
+          ],
+          "cad_xyz": [
+            30.55999755859375,
+            -3.5762786865234375e-07,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R06",
+          "source_xyz": [
+            27.86,
+            61.85,
+            0.0
+          ],
+          "cad_xyz": [
+            -27.860000610351562,
+            61.849998474121094,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R38",
+          "source_xyz": [
+            -30.56,
+            10.5,
+            0.0
+          ],
+          "cad_xyz": [
+            30.559999465942383,
+            10.5,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R07",
+          "source_xyz": [
+            30.26,
+            57.45,
+            0.0
+          ],
+          "cad_xyz": [
+            -30.260000228881836,
+            57.45000076293945,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R39",
+          "source_xyz": [
+            -30.56,
+            21.0,
+            0.0
+          ],
+          "cad_xyz": [
+            30.559999465942383,
+            21.0,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R08",
+          "source_xyz": [
+            30.56,
+            52.64,
+            0.0
+          ],
+          "cad_xyz": [
+            -30.559999465942383,
+            52.63999938964844,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R40",
+          "source_xyz": [
+            -30.56,
+            31.5,
+            0.0
+          ],
+          "cad_xyz": [
+            30.559959411621094,
+            31.49982452392578,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R09",
+          "source_xyz": [
+            29.8,
+            42.0,
+            0.0
+          ],
+          "cad_xyz": [
+            -29.799999237060547,
+            41.999977111816406,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R41",
+          "source_xyz": [
+            -30.56,
+            42.0,
+            0.0
+          ],
+          "cad_xyz": [
+            30.560148239135742,
+            42.002685546875,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R10",
+          "source_xyz": [
+            30.56,
+            31.5,
+            0.0
+          ],
+          "cad_xyz": [
+            -30.560001373291016,
+            31.5,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R42",
+          "source_xyz": [
+            -30.56,
+            52.64,
+            0.0
+          ],
+          "cad_xyz": [
+            30.559999465942383,
+            52.63999938964844,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R11",
+          "source_xyz": [
+            30.56,
+            21.0,
+            0.0
+          ],
+          "cad_xyz": [
+            -30.559999465942383,
+            21.000017166137695,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R43",
+          "source_xyz": [
+            -30.26,
+            57.45,
+            0.0
+          ],
+          "cad_xyz": [
+            30.260000228881836,
+            57.45000076293945,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R12",
+          "source_xyz": [
+            30.56,
+            10.5,
+            0.0
+          ],
+          "cad_xyz": [
+            -30.560001373291016,
+            10.500017166137695,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R44",
+          "source_xyz": [
+            -27.86,
+            61.85,
+            0.0
+          ],
+          "cad_xyz": [
+            27.860000610351562,
+            61.849998474121094,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R13",
+          "source_xyz": [
+            30.56,
+            0.0,
+            0.0
+          ],
+          "cad_xyz": [
+            -30.560022354125977,
+            0.00017833709716796875,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R14",
+          "source_xyz": [
+            30.56,
+            -10.5,
+            0.0
+          ],
+          "cad_xyz": [
+            -30.55998992919922,
+            -10.499947547912598,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R45",
+          "source_xyz": [
+            -23.56,
+            63.89,
+            0.0
+          ],
+          "cad_xyz": [
+            23.559999465942383,
+            63.88999938964844,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R15",
+          "source_xyz": [
+            30.56,
+            -21.0,
+            0.0
+          ],
+          "cad_xyz": [
+            -30.559999465942383,
+            -21.000001907348633,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R46",
+          "source_xyz": [
+            -19.07,
+            64.12,
+            0.0
+          ],
+          "cad_xyz": [
+            19.06999969482422,
+            64.12000274658203,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R16",
+          "source_xyz": [
+            30.56,
+            -31.5,
+            0.0
+          ],
+          "cad_xyz": [
+            -30.56001853942871,
+            -31.49979019165039,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R47",
+          "source_xyz": [
+            -12.6,
+            64.12,
+            0.0
+          ],
+          "cad_xyz": [
+            12.600001335144043,
+            64.12000274658203,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R17",
+          "source_xyz": [
+            30.56,
+            -42.0,
+            0.0
+          ],
+          "cad_xyz": [
+            -30.560434341430664,
+            -42.000396728515625,
+            2.1099894046783447
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face1078",
+          "source_pages": [
+            23
+          ],
+          "fai": 7
+        },
+        {
+          "name": "DATUMA_R32",
+          "source_xyz": [
+            -30.56,
+            -52.82,
+            0.465
+          ],
+          "cad_xyz": [
+            30.559999465942383,
+            -52.81999969482422,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        },
+        {
+          "name": "DATUMA_R18",
+          "source_xyz": [
+            30.56,
+            -52.82,
+            0.465
+          ],
+          "cad_xyz": [
+            -30.559999465942383,
+            -52.81999969482422,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        },
+        {
+          "name": "DATUMA_R19",
+          "source_xyz": [
+            30.26,
+            -57.63,
+            0.465
+          ],
+          "cad_xyz": [
+            -30.26005744934082,
+            -57.630035400390625,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        },
+        {
+          "name": "DATUMA_R20",
+          "source_xyz": [
+            27.86,
+            -62.03,
+            0.465
+          ],
+          "cad_xyz": [
+            -27.860000610351562,
+            -62.029998779296875,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        },
+        {
+          "name": "DATUMA_R21",
+          "source_xyz": [
+            23.56,
+            -64.07,
+            0.465
+          ],
+          "cad_xyz": [
+            -23.560081481933594,
+            -64.07007598876953,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        },
+        {
+          "name": "DATUMA_R22",
+          "source_xyz": [
+            19.07,
+            -64.3,
+            0.465
+          ],
+          "cad_xyz": [
+            -19.06999969482422,
+            -64.30000305175781,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        },
+        {
+          "name": "DATUMA_R23",
+          "source_xyz": [
+            12.6,
+            -64.3,
+            0.465
+          ],
+          "cad_xyz": [
+            -12.60000228881836,
+            -64.30000305175781,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        },
+        {
+          "name": "DATUMA_R24",
+          "source_xyz": [
+            6.3,
+            -64.3,
+            0.465
+          ],
+          "cad_xyz": [
+            -6.3002519607543945,
+            -64.29998779296875,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        },
+        {
+          "name": "DATUMA_R25",
+          "source_xyz": [
+            0.0,
+            -64.3,
+            0.465
+          ],
+          "cad_xyz": [
+            3.635883331298828e-06,
+            -64.30000305175781,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        },
+        {
+          "name": "DATUMA_R26",
+          "source_xyz": [
+            -6.3,
+            -64.3,
+            0.465
+          ],
+          "cad_xyz": [
+            6.299999237060547,
+            -64.30000305175781,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        },
+        {
+          "name": "DATUMA_R27",
+          "source_xyz": [
+            -12.6,
+            -64.3,
+            0.465
+          ],
+          "cad_xyz": [
+            12.5999755859375,
+            -64.30000305175781,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        },
+        {
+          "name": "DATUMA_R28",
+          "source_xyz": [
+            -19.07,
+            -64.3,
+            0.465
+          ],
+          "cad_xyz": [
+            19.06999969482422,
+            -64.30000305175781,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        },
+        {
+          "name": "DATUMA_R29",
+          "source_xyz": [
+            -23.56,
+            -64.07,
+            0.465
+          ],
+          "cad_xyz": [
+            23.559999465942383,
+            -64.06999969482422,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        },
+        {
+          "name": "DATUMA_R30",
+          "source_xyz": [
+            -27.86,
+            -62.03,
+            0.465
+          ],
+          "cad_xyz": [
+            27.860000610351562,
+            -62.029998779296875,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        },
+        {
+          "name": "DATUMA_R31",
+          "source_xyz": [
+            -30.26,
+            -57.63,
+            0.465
+          ],
+          "cad_xyz": [
+            30.260000228881836,
+            -57.630001068115234,
+            1.6454893350601196
+          ],
+          "face_id": "ec5e3a7adacd605e:instance24:face945",
+          "source_pages": [
+            24
+          ],
+          "fai": 14
+        }
+      ],
+      "conflicts": [],
+      "status": "geometrically_supported_proposal",
+      "rotation": [
+        [
+          -0.9999999999999896,
+          -1.4489978495558037e-07,
+          2.4363474462439265e-09
+        ],
+        [
+          -1.4489979377325037e-07,
+          0.9999999999933915,
+          -3.6327430316257506e-06
+        ],
+        [
+          -2.435821062428963e-09,
+          -3.6327430319779037e-06,
+          -0.9999999999934016
+        ]
+      ],
+      "translation_mm": [
+        -1.619429494497445e-05,
+        4.799041636550927e-05,
+        2.110145428594104
+      ],
+      "determinant": 1.0000000000000004,
+      "residuals_mm": [
+        9.355188752950575e-05,
+        9.434417630849687e-05,
+        0.0003126234150788539,
+        9.244725572700928e-05,
+        0.00027963814770271705,
+        9.325736756747313e-05,
+        0.0002680782093575337,
+        9.160585671958244e-05,
+        0.0002376663294795221,
+        9.226473770715091e-05,
+        0.0001653516362114654,
+        8.599146986361869e-05,
+        0.00013021591427722284,
+        7.216736482540833e-05,
+        9.729981187086476e-05,
+        6.1554404776538e-05,
+        0.0002325192894325926,
+        7.051704666281061e-05,
+        0.0026386465155168373,
+        6.322338115197306e-05,
+        6.773781238541239e-05,
+        8.621870586733991e-05,
+        7.773895944810708e-05,
+        0.00012182776952740425,
+        9.07572377027234e-05,
+        0.00020620968605210302,
+        0.00019586596560045746,
+        9.541804448686601e-05,
+        0.00023704188031651693,
+        9.405480705328239e-05,
+        0.00031747637617230356,
+        9.404729312524363e-05,
+        0.0006848483665732511,
+        0.00016029873415748731,
+        0.0001579382152772135,
+        0.0001629807835989862,
+        0.00012570770547037376,
+        0.00017905654315516906,
+        0.00012001335210258765,
+        0.00012023907088838803,
+        0.0002708166157968042,
+        0.00012131364068718645,
+        0.00012137307059807691,
+        0.00012284483087091058,
+        0.00012214668861328584,
+        0.00012175820144536342,
+        0.00012851374455921498,
+        0.00014431886075255175
+      ],
+      "max_residual_mm": 0.0026386465155168373,
+      "rms_residual_mm": 0.0004224297170584091,
+      "held_out_residuals_mm": [
+        9.814536911091886e-05,
+        9.861878068095584e-05,
+        0.00033373610937791656,
+        9.689748258077725e-05,
+        0.00029625412985386423,
+        9.797554560284111e-05,
+        0.00028106162127091464,
+        9.673537556487128e-05,
+        0.0002481761566134287,
+        9.772376501325844e-05,
+        0.00017364878722946295,
+        9.118988300079359e-05,
+        0.00013664091101267138,
+        7.608698366388158e-05,
+        0.00010197200833126908,
+        6.403668876444722e-05,
+        0.0002389169029869588,
+        7.212230533196701e-05,
+        0.0027084991700273816,
+        6.572963139592728e-05,
+        7.10364166170572e-05,
+        9.068234822499e-05,
+        8.235864115371416e-05,
+        0.00012815857483346475,
+        9.656471153237396e-05,
+        0.00021491361343155144,
+        0.0002063054120935341,
+        0.00010134970336863442,
+        0.0002502380510331536,
+        9.955052400419768e-05,
+        0.00033416773605225014,
+        9.900187728857647e-05,
+        0.0007063819203714207,
+        0.0001719645433109267,
+        0.00016973401830760822,
+        0.00017331781503662313,
+        0.00013530867389119087,
+        0.00018689385729284773,
+        0.00012756974726622984,
+        0.00012698594162699746,
+        0.0002842525203823333,
+        0.00012746162589362942,
+        0.00012763850191088337,
+        0.0001296883374853169,
+        0.00012958849279560706,
+        0.000129975863706,
+        0.0001379539121268337,
+        0.0001551225403210267
+      ],
+      "held_out_max_mm": 0.0027084991700273816,
+      "threshold_mm": 0.1,
+      "source_to_cad_registered": false,
+      "authority": "paired_source_points_and_display_mesh_only",
+      "metrology_accepted": false,
+      "evidence_sha256": "84a2e8564539bd2434951e15a2d9b50bae93db9a5818271923c282d551100ae5",
+      "automatic_application": false
+    }
+  ],
+  "rigid_frame_scope": "Automatically screened display-frame fit, source hash pinned; no metrology calibration or accuracy acceptance."
+}

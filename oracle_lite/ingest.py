@@ -13,7 +13,7 @@ import psutil
 from .config import AppConfig
 from .db import Registry
 from .ingest_worker import parse_and_write_canonical
-from .memory import GIB, process_tree_rss
+from .memory import GIB, MIB, process_tree_rss
 from .resources import HostResourcePolicy, wait_for_disk, wait_for_ram
 
 
@@ -94,9 +94,12 @@ def ingest_corpus(
             poll_seconds=1.0,
             stable_samples=3,
         )
-        # Reserve a bounded workspace for one source. Internal worker checks gate
-        # each page/media write again, so this is only the outer admission gate.
-        required_disk = max(2 * GIB, min(20 * GIB, source_path.stat().st_size * 4))
+        # Reserve a bounded workspace for one source. Tiny files need only a
+        # small staging allowance; a fixed multi-GiB floor can deadlock corpus
+        # tests and small incremental ingests near the host reserve threshold.
+        # Larger sources still reserve up to four times their input size, and
+        # internal worker checks gate each page/media write again.
+        required_disk = max(64 * MIB, min(20 * GIB, source_path.stat().st_size * 4))
         wait_for_disk(
             cfg.output_dir,
             policy,

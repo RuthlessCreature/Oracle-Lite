@@ -1,0 +1,18 @@
+{
+  "model_alias": "qwen3.8-27b",
+  "inference_backend": "vllm-self-hosted",
+  "identity": {
+    "expected_model_type": "qwen3_5",
+    "expected_architectures": ["Qwen3_5ForConditionalGeneration"]
+  },
+  "training_kind": "isolated_cloud_qlora",
+  "training_scope": "MSOP_source_coordinate_reading",
+  "progress_endpoint": "/api/viewer/cloud-training",
+  "local_receipt": "talker/state/cloud-training-status.json",
+  "training_gpu": 0,
+  "inference_gpu": 1,
+  "base_weights_read_only": true,
+  "XML_role": "final_output_from_virtual_shots_and_measurement_plan",
+  "XML_used_as_input": false,
+  "auto_deploy": false
+}

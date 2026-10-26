@@ -195,6 +195,17 @@ def create_snapshot(
                         poll_seconds=2.0,
                         stable_samples=1,
                     )
+                if Path(member["source_path"]).name == "qa_pairs.jsonl":
+                    frozen = snapshot_dir / f"qa-{member['content_hash']}.jsonl"
+                    digest = hashlib.sha256()
+                    with Path(member["source_path"]).open("rb") as source, frozen.open("wb") as target:
+                        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                            target.write(chunk)
+                    if digest.hexdigest() != member["content_hash"]:
+                        frozen.unlink()
+                        raise ValueError("QA source changed after scan; scan and ingest again before snapshotting")
+                    member["qa_snapshot_path"] = str(frozen.resolve())
                 out.write(json.dumps(member, ensure_ascii=False) + "\n")
 
         config = {

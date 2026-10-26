@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-cad/
 venv/
 .env
 .idea/
@@ -28,3 +29,23 @@ checkpoints/
 
 # Talker local chat state / uploads
 talker/state/
+
+# Downloaded vendor CAD and source packages (keep catalog indexes in Git)
+oracle_viewer/catalog/assets/
+oracle_viewer/catalog/source_archives/
+oracle_viewer/catalog/source_documents/
+oracle_viewer/catalog/*_audit.json
+oracle_viewer/catalog/*_source_check_*.json
+oracle_viewer/catalog/*_search_*.json
+oracle_viewer/catalog/*_validation.json
+oracle_viewer/catalog/*_probe.json
+
+# Generated reports, local profiling, browser logs and temporary downloads
+reports/
+logs/
+tmp/
+*.log
+perf.data*
+*.deb
+*.private.json
+.env.*

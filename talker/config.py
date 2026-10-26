@@ -7,13 +7,14 @@ from typing import Any
 import yaml
 
 
-ALLOWED_KEYS = {"training_output_dir"}
+ALLOWED_KEYS = {"training_output_dir", "fai_matching_model_root"}
 
 
 @dataclass(slots=True, frozen=True)
 class TalkerConfig:
     training_output_dir: Path
     talker_dir: Path
+    fai_matching_model_root: Path | None = None
 
     @property
     def state_dir(self) -> Path:
@@ -62,6 +63,10 @@ def load_config(path: str | Path | None = None) -> TalkerConfig:
     cfg = TalkerConfig(
         training_output_dir=training_output,
         talker_dir=talker_dir,
+        fai_matching_model_root=(
+            Path(str(raw["fai_matching_model_root"])).expanduser().resolve()
+            if raw.get("fai_matching_model_root") else None
+        ),
     )
     cfg.ensure_dirs()
     return cfg

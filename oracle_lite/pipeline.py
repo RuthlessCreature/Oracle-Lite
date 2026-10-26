@@ -222,6 +222,7 @@ def run_one_click(
             "records": int(dataset_meta.get("records", 0)),
             "text_records": int(dataset_meta.get("text_records", 0)),
             "visual_records": int(dataset_meta.get("visual_records", 0)),
+            "qa_records": int(dataset_meta.get("qa_records", 0)),
             "characters": int(dataset_meta.get("characters", 0)),
             "reused": dataset_reused,
         })

@@ -14,12 +14,31 @@ DEFAULT_BASE_MODEL_ID = "Qwen/Qwen3.5-9B-Base"
 DEFAULT_BASE_MODEL_DIRNAME = "Qwen3.5-9B-Base"
 
 
+def model_files_complete(target: Path) -> bool:
+    """A downloaded config alone does not make a loadable model cache."""
+    required = ['config.json', 'preprocessor_config.json', 'tokenizer_config.json']
+    if not all((target / name).is_file() for name in required):
+        return False
+    if not ((target / 'tokenizer.json').is_file() or (target / 'tokenizer.model').is_file()):
+        return False
+    index = target / 'model.safetensors.index.json'
+    if index.is_file():
+        try:
+            weights = set(json.loads(index.read_text())['weight_map'].values())
+        except (ValueError, KeyError, TypeError):
+            return False
+    else:
+        weights = {'model.safetensors'}
+    return bool(weights) and all((target / name).is_file() and (target / name).stat().st_size > 0
+                                for name in weights)
+
+
 def ensure_base_model(cfg: AppConfig, *, monitor: Any | None = None) -> Path:
     """Return local Qwen3.5 Base, waiting for safe disk capacity before download."""
     target = (cfg.models_dir / DEFAULT_BASE_MODEL_DIRNAME).resolve()
     config_path = target / "config.json"
 
-    if config_path.exists():
+    if model_files_complete(target):
         return target
 
     policy = HostResourcePolicy.auto(cfg.output_dir)
@@ -59,9 +78,9 @@ def ensure_base_model(cfg: AppConfig, *, monitor: Any | None = None) -> Path:
         local_dir=str(target),
     )
 
-    if not config_path.exists():
+    if not model_files_complete(target):
         raise RuntimeError(
-            f"Model download completed without config.json under {target}"
+            f"Model download is incomplete under {target}; weights or processor files are missing"
         )
 
     metadata = {

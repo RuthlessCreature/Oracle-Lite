@@ -1,1 +1,2 @@
-training_output_dir: "/home/cyg/Oracle/output3Suite"
+training_output_dir: "/home/cyg/Oracle/output3Suite2"
+fai_matching_model_root: "/home/cyg/Oracle/fai-matching-adaptation-v2"

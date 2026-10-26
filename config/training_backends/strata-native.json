@@ -1,0 +1,31 @@
+{
+  "model_alias": "qwen3.8-flash-next-iq2_xs",
+  "source_url": "https://huggingface.co/Qwen/Qwen3.8-Flash-Next",
+  "source_revision": "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+  "identity": {
+    "expected_model_type": "qwen4_exp",
+    "expected_architectures": [
+      "Qwen4ExpForConditionalGeneration"
+    ],
+    "training_checkpoint_bytes": 360000192888,
+    "native_training_backend_available": false
+  },
+  "native_training_backend_implemented": false,
+  "native_adapter_export_verified": false,
+  "note": "主体参数训练仍受原始checkpoint及导出链路限制。冻结主体输出层适配已完成真实参数训练和原生加载验证；两者分开报告，不允许把输出层试验当作全模型或几何训练完成。",
+  "native_output_head_backend_implemented": true,
+  "native_output_head_export_verified": true,
+  "native_output_head_default_enabled": false,
+  "source_output_refinement_report": "reports/engineering-checks/20261013/native-head-refinement/training-report.json",
+  "source_adapter_receipt": "reports/engineering-checks/20261012/native-head-pilot",
+  "source_output_head_backend": {
+    "enabled": true,
+    "capture_root": "reports/engineering-checks/20261012/native-head-pilot/captures",
+    "active_adapter": "/home/cyg/Strata/data/oracle-source-head-active.oha",
+    "candidate_root": "talker/state/viewer/source-head-training",
+    "backbone_files": [
+      "/home/cyg/Strata-data/models/IQ2_XS/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf",
+      "/home/cyg/Strata-data/models/IQ2_XS/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00002-of-00002.gguf"
+    ]
+  }
+}

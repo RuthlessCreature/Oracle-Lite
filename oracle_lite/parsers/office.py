@@ -11,6 +11,7 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from .base import ParsedDocument, ParsedSegment
+from ..pdf_layout import extract_pdf_positioned_blocks, extract_pdf_text, needs_positioned_pdf_text
 
 
 RASTER_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -104,7 +105,7 @@ def parse_pdf(path: Path, asset_dir: Path) -> ParsedDocument:
         for page_index in range(doc.page_count):
             idx = page_index + 1
             page = doc.load_page(page_index)
-            text = page.get_text("text").strip()
+            text = extract_pdf_text(page)
             if not text:
                 empty_pages += 1
 
@@ -118,7 +119,11 @@ def parse_pdf(path: Path, asset_dir: Path) -> ParsedDocument:
                 ParsedSegment(
                     text=text,
                     images=[str(image_path.resolve())],
-                    metadata={"kind": "pdf_page", "page": idx},
+                    metadata={
+                        "kind": "pdf_page", "page": idx, "text_layout": "geometric-rows-v2",
+                        **({"positioned_blocks": extract_pdf_positioned_blocks(page)}
+                           if needs_positioned_pdf_text(page) else {}),
+                    },
                 )
             )
             del pix

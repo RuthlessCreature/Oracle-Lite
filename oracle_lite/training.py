@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import inspect
 import json
 import math
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -12,7 +14,8 @@ from pathlib import Path
 
 from .config import AppConfig
 from .db import Registry
-from .models import DEFAULT_BASE_MODEL_ID, ensure_base_model
+from .grounding import GROUNDING_PROMPT_VERSION, instruction_conversation, render_processor_prompt
+from .models import DEFAULT_BASE_MODEL_ID, ensure_base_model, model_files_complete
 from .resources import (
     GIB,
     HostResourcePolicy,
@@ -52,6 +55,14 @@ RTX4080_16GB_MULTIMODAL_PRESET = {
     "seed": 42,
     "trust_remote_code": False,
 }
+
+
+def _text_backoff_lengths(requested_text_length: int, *, preserve_requested: bool) -> list[int]:
+    """Return VRAM fallback budgets without dropping complete source targets."""
+    candidates = (1024, 768, 512, 384)
+    if preserve_requested:
+        return [max(requested_text_length, candidate) for candidate in candidates]
+    return list(candidates)
 
 
 def _now() -> str:
@@ -189,6 +200,12 @@ def _base_multimodal_prompt(processor) -> str:
     )
 
 
+def load_training_dataset(shard_paths, *, mode=None):
+    from .training_data import JSONLStreamingDataset
+
+    return JSONLStreamingDataset(shard_paths, mode=mode)
+
+
 class MultimodalDomainCollator:
     """Batch-size-1 collator mixing text CLM and grounded VLM supervision."""
 
@@ -203,6 +220,74 @@ class MultimodalDomainCollator:
         item = features[0]
         mode = item.get("mode", "text")
         text = (item.get("text") or "").strip()
+
+        if mode == "instruction":
+            import torch
+
+            tokenizer = self.processor.tokenizer
+            question = (item.get("question") or "").strip()
+            answer = (item.get("answer") or text).strip()
+            context = (item.get("context") or "").strip()
+            source = Path(item.get("source_path") or "source").name
+            max_length = int(self.cfg["text_max_length"])
+
+            if not question or not answer or not context:
+                raise ValueError("Instruction records require question, answer, and supporting context")
+            image_paths = item.get('images') or []
+            if len(image_paths) > 1:
+                raise ValueError('Instruction records allow at most one image')
+            prompt = render_processor_prompt(self.processor, instruction_conversation(question, context, source))
+            visual_batch = None
+            if image_paths:
+                from PIL import Image
+                vision_start = getattr(self.processor, 'vision_start_token', '<|vision_start|>')
+                image_token = getattr(self.processor, 'image_token', '<|image_pad|>')
+                vision_end = getattr(self.processor, 'vision_end_token', '<|vision_end|>')
+                prompt = render_processor_prompt(
+                    self.processor, instruction_conversation(question, context, source), image_count=1,
+                    image_prefix=f'{vision_start}{image_token}{vision_end}\n',
+                )
+                with Image.open(image_paths[0]) as image:
+                    visual_batch = self.processor(text=[prompt], images=[image.convert('RGB')],
+                                                  return_tensors='pt', padding=False)
+                prompt_ids = visual_batch['input_ids'][0]
+            else:
+                prompt_ids = tokenizer(prompt, return_tensors='pt', add_special_tokens=True,
+                                       truncation=False)['input_ids'][0]
+            answer_ids = tokenizer(
+                answer,
+                return_tensors="pt",
+                add_special_tokens=False,
+                truncation=False,
+            )["input_ids"][0]
+            eos_id = tokenizer.eos_token_id
+            if eos_id is not None:
+                answer_ids = torch.cat((answer_ids, answer_ids.new_tensor([eos_id])))
+            if len(prompt_ids) + len(answer_ids) > max_length:
+                raise ValueError(
+                    "Instruction source and complete answer exceed text_max_length; "
+                    "use a shorter verified source excerpt or increase the token budget. "
+                    "Evidence and answer are never silently truncated."
+                )
+
+            input_ids = torch.cat((prompt_ids, answer_ids)).unsqueeze(0)
+            labels = input_ids.clone()
+            labels[:, : len(prompt_ids)] = -100
+            batch = {
+                "input_ids": input_ids,
+                "attention_mask": torch.ones_like(input_ids),
+                "labels": labels,
+            }
+            if visual_batch is not None:
+                # Preserve vision tensors and grid metadata while masking every
+                # prompt/image token; only the complete answer and EOS get loss.
+                batch.update({key: value for key, value in visual_batch.items()
+                              if key not in ('input_ids', 'attention_mask', 'labels')})
+                for key in ('mm_token_type_ids', 'token_type_ids'):
+                    if key in batch:
+                        types = batch[key]
+                        batch[key] = torch.cat((types, types.new_zeros((1, len(answer_ids)))), dim=1)
+            return batch
 
         if mode != "multimodal" or not item.get("images"):
             batch = self.processor.tokenizer(
@@ -269,6 +354,14 @@ def run_domain_training(
     *,
     snapshot_id: str,
     max_steps: int | None = None,
+    instruction_only: bool = False,
+    instruction_data: Path | None = None,
+    gradient_accumulation_steps: int | None = None,
+    learning_rate: float | None = None,
+    num_train_epochs: float | None = None,
+    base_model_path: Path | None = None,
+    text_max_length: int | None = None,
+    initial_adapter: Path | None = None,
     monitor=None,
 ) -> str:
     """Train with streaming data and RAM/disk/VRAM admission control."""
@@ -281,8 +374,7 @@ def run_domain_training(
     try:
         import torch
         import torchvision  # noqa: F401 - required by Qwen3.5 visual/video processor
-        from datasets import load_dataset
-        from peft import LoraConfig, get_peft_model
+        from peft import LoraConfig, PeftModel, get_peft_model
         from transformers import (
             AutoModelForMultimodalLM,
             AutoProcessor,
@@ -302,6 +394,16 @@ def run_domain_training(
 
     policy = HostResourcePolicy.auto(app_cfg.output_dir)
     cfg = dict(RTX4080_16GB_MULTIMODAL_PRESET)
+    for key, value in [('gradient_accumulation_steps', gradient_accumulation_steps),
+                       ('learning_rate', learning_rate), ('num_train_epochs', num_train_epochs)]:
+        if value is not None:
+            if value <= 0:
+                raise ValueError(f'{key} must be positive')
+            cfg[key] = value
+    if text_max_length is not None:
+        if text_max_length < 384 or text_max_length > 16_384:
+            raise ValueError('text_max_length must be between 384 and 16384')
+        cfg['text_max_length'] = text_max_length
     runtime_backoff = {
         "requested": False,
         "reason": None,
@@ -554,24 +656,48 @@ def run_domain_training(
         def on_train_end(self, args, state, control, **kwargs):
             self._push(state, progress_percent=100.0, eta_seconds=0)
 
+    selected_model_id = DEFAULT_BASE_MODEL_ID
+    selected_model_path = Path(base_model_path).expanduser().resolve() if base_model_path else None
+    if selected_model_path is not None:
+        if not model_files_complete(selected_model_path):
+            raise ValueError(f"Local base model is incomplete: {selected_model_path}")
+        metadata_path = selected_model_path / 'oracle-model.json'
+        if metadata_path.is_file():
+            try:
+                selected_model_id = str(json.loads(metadata_path.read_text()).get('repo_id') or selected_model_path.name)
+            except (ValueError, TypeError):
+                selected_model_id = selected_model_path.name
+        else:
+            selected_model_id = selected_model_path.name
+
     if monitor is not None:
         monitor.update("system", {
             **policy.as_dict(),
             "resource_policy": "admission-control-no-kill",
         })
-        monitor.update("model", {"model_id": DEFAULT_BASE_MODEL_ID})
-        monitor.update_phase("model_download", "Checking / downloading Qwen3.5-9B-Base")
+        monitor.update("model", {"model_id": selected_model_id})
+        monitor.update_phase("model_download", "Checking local multimodal model")
 
     _disk_gate(
         "model_download",
         "Checking / downloading Qwen3.5-9B-Base",
         required_bytes=policy.model_download_budget_bytes,
     )
-    model_path = ensure_base_model(app_cfg, monitor=monitor)
+    model_path = selected_model_path or ensure_base_model(app_cfg, monitor=monitor)
+    if initial_adapter is not None:
+        initial_adapter = Path(initial_adapter).expanduser().resolve()
+        adapter_cfg = json.loads((initial_adapter / 'adapter_config.json').read_text())
+        if Path(adapter_cfg['base_model_name_or_path']).expanduser().resolve() != model_path.resolve():
+            raise ValueError('Initial adapter base model does not match selected local base model')
+        weights = initial_adapter / 'adapter_model.safetensors'
+        if not weights.is_file():
+            raise ValueError('Initial adapter requires adapter_model.safetensors')
+        cfg['initial_adapter'] = str(initial_adapter)
+        cfg['initial_adapter_sha256'] = hashlib.sha256(weights.read_bytes()).hexdigest()
 
     if monitor is not None:
         monitor.update("model", {
-            "model_id": DEFAULT_BASE_MODEL_ID,
+            "model_id": selected_model_id,
             "local_path": str(model_path),
         })
         monitor.log("INFO", "Base model ready", path=str(model_path))
@@ -589,7 +715,13 @@ def run_domain_training(
     if not shard_paths:
         raise FileNotFoundError(f"No domain shards found under {dataset_dir}")
 
-    records = int(dataset_meta.get("records", 0))
+    records = int(dataset_meta.get("qa_records" if instruction_only else "records", 0))
+    external = None
+    if instruction_data is not None:
+        from .training_data import freeze_instruction_shard
+        frozen, count, digest = freeze_instruction_shard(Path(instruction_data), app_cfg.output_dir / '_instruction_inputs')
+        external = {'path': str(frozen), 'records': count, 'sha256': digest}
+        records += count
     if records <= 0:
         raise ValueError("Domain dataset contains no trainable records")
 
@@ -607,10 +739,23 @@ def run_domain_training(
     )
     cfg["max_steps"] = int(max_steps) if max_steps is not None else computed_steps
 
+    model_slug = re.sub(r'[^a-z0-9]+', '-', model_path.name.lower()).strip('-')
     output_dir = (
-        app_cfg.training_dir / snapshot_id / "qwen3.5-9b-base-multimodal-rtx4080"
+        app_cfg.training_dir / snapshot_id /
+        f"{model_slug}-multimodal-rtx4080-{GROUNDING_PROMPT_VERSION}"
     ).resolve()
+    if instruction_only or external:
+        suffix = '-sft' if instruction_only else '-mixed-sft'
+        if external:
+            suffix += '-' + external['sha256'][:12]
+        suffix += '-' + hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:8]
+        output_dir = output_dir.with_name(output_dir.name + suffix)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if external:
+        target = output_dir / 'instruction-input.jsonl'
+        Path(external['path']).replace(target)
+        external['path'] = str(target)
+        shard_paths.append(str(target))
 
     if monitor is not None:
         monitor.update_phase("training_prepare", "Preparing streaming training run")
@@ -744,19 +889,23 @@ def run_domain_training(
             model,
             use_gradient_checkpointing=cfg["gradient_checkpointing"],
         )
-        model = get_peft_model(
-            model,
-            LoraConfig(
-                r=cfg["lora_r"],
-                lora_alpha=cfg["lora_alpha"],
-                lora_dropout=cfg["lora_dropout"],
-                bias="none",
-                target_modules=cfg["target_modules"],
-                exclude_modules=cfg["exclude_modules"],
-                task_type="CAUSAL_LM",
-            ),
-            autocast_adapter_dtype=False,
-        )
+        if initial_adapter is not None:
+            model = PeftModel.from_pretrained(model, str(initial_adapter), is_trainable=True,
+                                             autocast_adapter_dtype=False)
+        else:
+            model = get_peft_model(
+                model,
+                LoraConfig(
+                    r=cfg["lora_r"],
+                    lora_alpha=cfg["lora_alpha"],
+                    lora_dropout=cfg["lora_dropout"],
+                    bias="none",
+                    target_modules=cfg["target_modules"],
+                    exclude_modules=cfg["exclude_modules"],
+                    task_type="CAUSAL_LM",
+                ),
+                autocast_adapter_dtype=False,
+            )
 
         trainable = []
         forbidden_visual_trainables = []
@@ -794,12 +943,7 @@ def run_domain_training(
             monitor.update_phase("dataset_stream", "Opening streaming JSONL dataset")
 
         # No Arrow materialization/cache: local JSONL is iterated record-by-record.
-        train_ds = load_dataset(
-            "json",
-            data_files=shard_paths,
-            split="train",
-            streaming=True,
-        ).filter(lambda row: bool((row.get("text") or "").strip()))
+        train_ds = load_training_dataset(shard_paths, mode='instruction' if instruction_only else None)
 
         args, dropped_training_args = _build_training_arguments(
             TrainingArguments,
@@ -825,7 +969,12 @@ def run_domain_training(
 
         oom_level = 0
         oom_pixel_budgets = [196_608, 131_072, 98_304, 65_536]
-        oom_text_lengths = [1024, 768, 512, 384]
+        requested_text_length = int(cfg['text_max_length'])
+        # Runtime backoff may reduce image work, but an explicit sequence
+        # budget is also the no-truncation floor for complete training samples.
+        oom_text_lengths = _text_backoff_lengths(
+            requested_text_length, preserve_requested=text_max_length is not None
+        )
         oom_visual_chars = [2000, 1500, 1000, 750]
 
         while True:
@@ -934,11 +1083,15 @@ def run_domain_training(
                 {
                     "run_id": run_id,
                     "snapshot_id": snapshot_id,
-                    "base_model_id": DEFAULT_BASE_MODEL_ID,
+                    "base_model_id": selected_model_id,
                     "base_model_path": str(model_path),
                     "dataset": dataset_meta,
                     "preset": "rtx4080_16gb_qwen35_multimodal_v4_vram_headroom",
                     "preset_values": cfg,
+                    "instruction_prompt_version": GROUNDING_PROMPT_VERSION,
+                    "instruction_only": instruction_only,
+                    "external_instruction_data": external,
+                    "training_records": records,
                     "smoke_test": max_steps is not None,
                     "streaming_dataset": True,
                     "vision_base_frozen": True,

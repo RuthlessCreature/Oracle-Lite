@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,7 @@ class DatasetResult:
     text_records: int
     visual_records: int
     characters: int
+    qa_records: int = 0
 
 
 def build_domain_dataset(
@@ -51,10 +53,22 @@ def build_domain_dataset(
     records = 0
     text_records = 0
     visual_records = 0
+    qa_records = 0
     characters = 0
+    qa_members: list[dict] = []
 
     def write_record(record: dict) -> None:
         nonlocal shard, shard_idx, in_shard, records
+        # Keep a stable JSONL schema so streaming Arrow/JSON readers can cast
+        # the final QA rows after the multimodal rows in the same shard.
+        record.setdefault("question", "")
+        record.setdefault("answer", "")
+        record.setdefault("context", "")
+        record.setdefault("content_hash", "")
+        record.setdefault("segment_index", 0)
+        record.setdefault("segment_metadata", {})
+        record.setdefault("role", "current")
+        record.setdefault("images", [])
         # Dataset records are bounded, but disk admission is rechecked
         # periodically so long builds cannot consume the OS reserve.
         if records % 25 == 0:
@@ -85,6 +99,12 @@ def build_domain_dataset(
                 if not line.strip():
                     continue
                 member = json.loads(line)
+                # This file is parsed separately as curated instruction data
+                # below. Training its flattened JSON representation as raw text
+                # would teach the model to continue JSON instead of answering.
+                if Path(member["source_path"]).name == "qa_pairs.jsonl":
+                    qa_members.append(member)
+                    continue
                 canonical_path = Path(member["canonical_path"])
                 header = CanonicalDocument.read_header(canonical_path)
                 role = member.get("role", "current")
@@ -148,6 +168,56 @@ def build_domain_dataset(
     finally:
         if shard is not None:
             shard.close()
+            shard = None
+
+    try:
+        for qa_member in qa_members:
+            qa_path = Path(qa_member.get("qa_snapshot_path") or qa_member["source_path"])
+            digest = hashlib.sha256()
+            with qa_path.open("rb") as qa_source:
+                for chunk in iter(lambda: qa_source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != qa_member["content_hash"]:
+                raise ValueError("QA contents no longer match the snapshot; prepare a new snapshot")
+            with qa_path.open("r", encoding="utf-8-sig") as qa_file:
+                for line_number, line in enumerate(qa_file, start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        pair = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(
+                            f"Invalid JSON in {qa_path}:{line_number}: {exc}"
+                        ) from exc
+                    if not isinstance(pair, dict):
+                        raise ValueError(f"{qa_path}:{line_number} requires a JSON object")
+                    if not all(isinstance(pair.get(key), str) for key in ("question", "answer", "context")):
+                        raise ValueError(f"{qa_path}:{line_number} requires string question, answer, and context")
+                    question = str(pair.get("question") or "").strip()
+                    answer = str(pair.get("answer") or "").strip()
+                    context = str(pair.get("context") or "").strip()
+                    if not question or not answer or not context:
+                        raise ValueError(
+                            f"{qa_path}:{line_number} requires non-empty question, answer, and context"
+                        )
+                    source_path = str(pair.get("source_path") or "curated source")
+                    write_record({
+                        "mode": "instruction",
+                        "text": answer,
+                        "question": question,
+                        "answer": answer,
+                        "context": context,
+                        "source_path": source_path,
+                        "images": [],
+                        "content_hash": qa_member["content_hash"],
+                        "role": qa_member.get("role", "current"),
+                    })
+                    qa_records += 1
+                    characters += len(context) + len(answer)
+    finally:
+        if shard is not None:
+            shard.close()
+            shard = None
 
     manifest = {
         "snapshot_id": snapshot_id,
@@ -155,6 +225,7 @@ def build_domain_dataset(
         "records": records,
         "text_records": text_records,
         "visual_records": visual_records,
+        "qa_records": qa_records,
         "characters": characters,
         "shards": [p.name for p in shard_paths],
     }
@@ -177,6 +248,7 @@ def build_domain_dataset(
         text_records=text_records,
         visual_records=visual_records,
         characters=characters,
+        qa_records=qa_records,
     )
 
 

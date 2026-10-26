@@ -9,8 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from .memory import apply_linux_address_space_limit
+from .memory import MIB, apply_linux_address_space_limit
 from .normalize import normalize_text
+from .pdf_layout import extract_pdf_positioned_blocks, extract_pdf_text, needs_positioned_pdf_text
 from .resources import recommended_pdf_max_pixels, scale_for_pixel_budget
 
 
@@ -246,7 +247,7 @@ def _stream_pdf_source(
         with sidecar_tmp.open("w", encoding="utf-8") as out:
             for page_index in range(doc.page_count):
                 page = doc.load_page(page_index)
-                text = page.get_text("text").strip()
+                text = extract_pdf_text(page)
                 rect = page.rect
                 scale = scale_for_pixel_budget(rect.width, rect.height, max_pixels)
                 pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
@@ -265,6 +266,9 @@ def _stream_pdf_source(
                     metadata={
                         "kind": "pdf_page_low_memory",
                         "page": page_index + 1,
+                        "text_layout": "geometric-rows-v2",
+                        **({"positioned_blocks": extract_pdf_positioned_blocks(page)}
+                           if needs_positioned_pdf_text(page) else {}),
                         "raster_scale": scale,
                         "max_pixels": max_pixels,
                     },
@@ -453,7 +457,7 @@ def parse_and_write_canonical(
             output,
             disk_reserve_bytes=disk_reserve_bytes,
             disk_resume_bytes=disk_resume_bytes,
-            required_bytes=max(2 * 1024 * 1024 * 1024, source.stat().st_size * 4),
+            required_bytes=max(64 * MIB, min(20 * 1024 * 1024 * 1024, source.stat().st_size * 4)),
         )
         parsed = parse_file(source, asset_dir=assets)
         document_text = ""

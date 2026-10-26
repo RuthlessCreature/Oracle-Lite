@@ -34,7 +34,7 @@ class AppConfig:
     output_dir: Path
 
     # Internal defaults: intentionally not user-facing configuration.
-    parser_version: str = field(default="v5-cad-corpus-isolation", init=False)
+    parser_version: str = field(default="v7-positioned-pdf-layout", init=False)
     hash_algorithm: str = field(default="sha256", init=False)
     include_extensions: set[str] = field(default_factory=lambda: set(DEFAULT_EXTENSIONS), init=False)
     ignore_names: set[str] = field(default_factory=lambda: set(DEFAULT_IGNORE_NAMES), init=False)

@@ -49,7 +49,7 @@ textarea:focus{border-color:#4f78a5}
 <body>
 <div class="app">
   <aside class="sidebar">
-    <div class="brand"><h1>ORACLE-LITE TALKER</h1><small>Local multimodal adapter chat</small></div>
+    <div class="brand"><h1>ORACLE-LITE TALKER</h1><small>图纸、测量与方案问答 · 本地运行</small></div>
     <div class="side-actions">
       <button id="newBtn" class="primary">+ 新会话</button>
       <button id="deleteBtn" class="danger">删除</button>
@@ -62,7 +62,7 @@ textarea:focus{border-color:#4f78a5}
         <div id="statusDot" class="dot"></div>
         <div class="statusText"><strong id="statusTitle">正在检查模型</strong><span id="statusDetail">—</span></div>
       </div>
-      <button id="reloadBtn">重新加载最新 Adapter</button>
+      <div><a id="viewerLink" href="/viewer" style="color:#6ea8fe;margin-right:16px">Oracle Viewer ↗</a><button id="reloadBtn">更新本地模型</button></div>
     </header>
     <section id="messages" class="messages"><div class="empty">新建或选择一个会话开始。</div></section>
     <section class="composer">
@@ -83,6 +83,9 @@ textarea:focus{border-color:#4f78a5}
 let currentConversation=null;
 let pendingFiles=[];
 let busy=false;
+const projectParams=new URLSearchParams(location.search);
+const viewerProject=projectParams.get('project');
+const viewerFAI=projectParams.get('fai');
 const $=id=>document.getElementById(id);
 const escapeHtml=s=>(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 
@@ -98,9 +101,9 @@ async function loadStatus(){
   try{
     const s=await api("/api/status");
     $("statusDot").className="dot "+(s.loaded?"ok":(s.error?"bad":""));
-    $("statusTitle").textContent=s.loaded?"模型已加载":"模型未就绪";
-    $("statusDetail").textContent=s.loaded?((s.adapter_kind||"adapter")+" · "+(s.adapter_dir||"")):(s.error||s.training_output_dir);
-  }catch(e){$("statusDot").className="dot bad";$("statusTitle").textContent="状态错误";$("statusDetail").textContent=e.message}
+    $("statusTitle").textContent=s.loaded?"本地问答已就绪":"本地问答未就绪";
+    $("statusDetail").textContent=s.loaded?"可询问图纸、测量方法和设备方案":"请联系维护人员检查本地推理服务";$("statusDetail").title=s.loaded?((s.adapter_kind||"adapter")+" · "+(s.adapter_dir||"")):(s.error||s.training_output_dir||"");
+  }catch(e){$("statusDot").className="dot bad";$("statusTitle").textContent="无法连接本地服务";$("statusDetail").textContent=e.message}
 }
 async function loadConversations(selectFirst=false){
   const rows=await api("/api/conversations");
@@ -162,13 +165,14 @@ async function send(){
   const text=$("input").value.trim();
   if(!text&&!pendingFiles.length)return;
   busy=true;$("sendBtn").disabled=true;$("sendBtn").classList.add("loading");
-  setNotice("正在推理，本地 9B 模型可能需要一些时间…");
+  setNotice("正在整理回答，请稍候…");
   try{
     if(!currentConversation){
       const c=await api("/api/conversations",{method:"POST"});
       currentConversation=c.id;
     }
     const fd=new FormData();fd.append("conversation_id",currentConversation);fd.append("message",text);
+    if(viewerProject){fd.append("project_id",viewerProject);if(viewerFAI)fd.append("fai",viewerFAI)}
     pendingFiles.forEach(f=>fd.append("files",f,f.name));
     $("input").value="";
     const sentFiles=[...pendingFiles];pendingFiles=[];renderFilebar();
@@ -190,10 +194,10 @@ $("files").addEventListener("change",e=>{pendingFiles.push(...e.target.files);e.
 $("sendBtn").onclick=send;$("newBtn").onclick=newConversation;$("deleteBtn").onclick=deleteConversation;
 $("input").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send()}});
 $("reloadBtn").onclick=async()=>{
-  if(busy)return;setNotice("正在重新加载最新 Adapter…");
+  if(busy)return;setNotice("正在更新本地模型…");
   try{await api("/api/reload-model",{method:"POST"});await loadStatus();setNotice("模型已重新加载。")}catch(e){setNotice(e.message,true);await loadStatus()}
 };
-(async()=>{await loadStatus();await loadConversations(true);if(!currentConversation)await newConversation()})();
+(async()=>{await loadStatus();if(viewerProject){await newConversation();$("viewerLink").href="/viewer?project="+encodeURIComponent(viewerProject);setNotice("项目对话 · FAI "+(viewerFAI||"未指定")+" · 与 Viewer 共用测量方法及关联记录")}else{await loadConversations(true);if(!currentConversation)await newConversation()}})();
 </script>
 </body>
 </html>

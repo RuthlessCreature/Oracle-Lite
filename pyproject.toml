@@ -20,6 +20,8 @@ dependencies = [
   "python-pptx>=1.0",
   "huggingface-hub>=0.30",
   "psutil>=6.1",
+  "numpy>=1.26",
+  "scipy>=1.13",
   "nvidia-ml-py>=12.570",
 ]
 
@@ -55,7 +57,10 @@ oracle-lite = "oracle_lite.cli:app"
 oracle-talker = "talker.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["oracle_lite*", "talker*"]
+include = ["oracle_lite*", "talker*", "oracle_viewer*"]
+
+[tool.setuptools.package-data]
+oracle_viewer = ["static/*", "static/vendor/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -29,17 +29,32 @@ def _run_dir_for_adapter(adapter_dir: Path) -> Path:
     return adapter_dir.parent
 
 
-def _resolve_base_model(adapter_dir: Path, run_dir: Path, run_metadata: dict) -> Path:
+def _resolve_base_model(
+    adapter_dir: Path,
+    run_dir: Path,
+    run_metadata: dict,
+    training_output_dir: Path,
+) -> Path:
     configured = run_metadata.get("base_model_path")
+    adapter_cfg = _read_json(adapter_dir / "adapter_config.json")
+    adapter_base = adapter_cfg.get("base_model_name_or_path")
+
+    # The configured output root may contain its own local base-model copy.
+    # Prefer that copy so switching Talker to a new output root also switches
+    # the complete model bundle, even when run metadata keeps an older path.
+    for value in (configured, adapter_base):
+        if value:
+            local = training_output_dir / "models" / Path(str(value)).name
+            if (local / "config.json").exists():
+                return local.resolve()
+
     if configured:
         path = Path(str(configured)).expanduser().resolve()
         if (path / "config.json").exists():
             return path
 
-    adapter_cfg = _read_json(adapter_dir / "adapter_config.json")
-    base = adapter_cfg.get("base_model_name_or_path")
-    if base:
-        path = Path(str(base)).expanduser()
+    if adapter_base:
+        path = Path(str(adapter_base)).expanduser()
         if path.exists() and (path.resolve() / "config.json").exists():
             return path.resolve()
 
@@ -81,18 +96,21 @@ def discover_latest_adapter(training_output_dir: str | Path) -> AdapterBundle:
             "Expected adapter-final/adapter_config.json or checkpoint-*/adapter_config.json."
         )
 
-    def score(path: Path) -> tuple[float, int]:
+    def score(path: Path) -> tuple[int, float]:
         try:
             mtime = (path / "adapter_config.json").stat().st_mtime
         except OSError:
             mtime = 0.0
         final_bonus = 1 if path.name == "adapter-final" else 0
-        return (mtime, final_bonus)
+        # A completed run writes adapter-final after the last optimizer step.
+        # Prefer it over a checkpoint even when that checkpoint's config file
+        # happens to have a newer mtime (for example after a resumed run).
+        return (final_bonus, mtime)
 
     adapter_dir = max(unique.values(), key=score)
     run_dir = _run_dir_for_adapter(adapter_dir)
     run_metadata = _read_json(run_dir / "run.json")
-    base_model = _resolve_base_model(adapter_dir, run_dir, run_metadata)
+    base_model = _resolve_base_model(adapter_dir, run_dir, run_metadata, root)
     return AdapterBundle(
         adapter_dir=adapter_dir,
         run_dir=run_dir,

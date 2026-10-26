@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import gc
+import os
+import re
 import shutil
 import uuid
 from contextlib import asynccontextmanager
@@ -23,7 +26,26 @@ class TalkerState:
         self.cfg = cfg
         self.history = ChatHistory(cfg.history_db)
         self.model = TalkerModel(cfg.training_output_dir)
+        viewer_url = os.environ.get("ORACLE_VIEWER_MODEL_BASE_URL", "").strip()
+        self.viewer_model = (
+            TalkerModel(
+                cfg.training_output_dir,
+                openai_base_url=viewer_url,
+                openai_model=os.environ.get(
+                    "ORACLE_VIEWER_MODEL", "qwen3.8-flash-next-iq2_xs"
+                ),
+                backend_label=os.environ.get(
+                    "ORACLE_VIEWER_MODEL_BACKEND", "strata-native"
+                ),
+                openai_api_key=os.environ.get("ORACLE_VIEWER_MODEL_API_KEY", ""),
+            )
+            if viewer_url else self.model
+        )
+        if (viewer_url and self.model.openai_base_url.rstrip('/')==viewer_url.rstrip('/')
+                and self.model.openai_model==os.environ.get('ORACLE_VIEWER_MODEL','qwen3.8-flash-next-iq2_xs')):
+            self.viewer_model=self.model
         self.model_error: str | None = None
+        self.viewer_model_error: str | None = None
 
     def load_model(self) -> None:
         try:
@@ -31,11 +53,19 @@ class TalkerState:
             self.model_error = None
         except Exception as exc:
             self.model_error = f"{type(exc).__name__}: {exc}"
+        if self.viewer_model is not self.model:
+            try:
+                self.viewer_model.load()
+                self.viewer_model_error = None
+            except Exception as exc:
+                self.viewer_model_error = f"{type(exc).__name__}: {exc}"
 
     def status(self) -> dict:
         return {
             **self.model.info(),
             "error": self.model_error,
+            "viewer_model": self.viewer_model.info(),
+            "viewer_model_error": self.viewer_model_error,
             "training_output_dir": str(self.cfg.training_output_dir),
         }
 
@@ -47,7 +77,10 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await run_in_threadpool(state.load_model)
-        yield
+        try:
+            yield
+        finally:
+            app.state.viewer_pool.shutdown(wait=False, cancel_futures=True)
 
     app = FastAPI(
         title="Oracle-Lite Talker",
@@ -56,6 +89,8 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.talker = state
+    from oracle_viewer.api import attach_viewer
+    attach_viewer(app, state)
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
@@ -89,24 +124,19 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     async def reload_model():
         # A 9B model cannot safely coexist with its replacement on a 16GB GPU.
         # Release the old instance first, then discover/load the newest adapter.
-        old = state.model
-        try:
-            import torch
-            old.model = None
-            old.processor = None
-            old.bundle = None
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
-
-        state.model = TalkerModel(cfg.training_output_dir)
-        try:
-            await run_in_threadpool(state.model.load)
-            state.model_error = None
-        except Exception as exc:
-            state.model_error = f"{type(exc).__name__}: {exc}"
+        def reload_shared():
+            # Keep the shared object/mutex stable for queued Viewer tasks.
+            with state.model._lock:
+                import torch
+                state.model.model = None
+                state.model.processor = None
+                state.model.bundle = None
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                state.load_model()
+        await run_in_threadpool(reload_shared)
+        if state.model_error:
             raise HTTPException(status_code=500, detail=state.model_error)
         return state.status()
 
@@ -143,6 +173,8 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     async def chat(
         conversation_id: str | None = Form(default=None),
         message: str = Form(default=""),
+        project_id: str | None = Form(default=None),
+        fai: int | None = Form(default=None),
         files: list[UploadFile] | None = File(default=None),
     ):
         if state.model_error or not state.model.loaded:
@@ -155,6 +187,17 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
         text = message.strip()
         if not text and not uploads:
             raise HTTPException(status_code=400, detail="Message or attachment required")
+
+        project_detail = None
+        if project_id:
+            requested = re.search(r'(?<![A-Za-z0-9_])FAI\s*0*(\d+)(?!\d)', text, re.I)
+            number = int(requested.group(1)) if requested else fai
+            if number is None:
+                raise HTTPException(400, "项目对话需要指定 FAI 编号")
+            try:
+                project_detail = state.viewer.detail(project_id, number)
+            except (KeyError, ValueError) as exc:
+                raise HTTPException(404, str(exc)) from exc
 
         conversation_id = state.history.ensure_conversation(conversation_id)
         user_message_id = state.history.add_message(
@@ -204,10 +247,26 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
 
         current_messages = state.history.get_messages(conversation_id)
         try:
-            answer = await run_in_threadpool(
-                state.model.answer,
-                current_messages,
-            )
+            if project_detail:
+                from oracle_viewer.assistant import answer_project
+                task = state.viewer.task(project_id, project_detail['item']['number'], text)
+                state.viewer.update_task(project_id, task['id'], status='running', conversation_id=conversation_id)
+                try:
+                    result = await run_in_threadpool(
+                        answer_project, state.model,
+                        f"针对 FAI {project_detail['item']['number']}，{text}",
+                        task['input_context'], task['binding'],
+                    )
+                    state.viewer.update_task(project_id, task['id'], status='complete', result=result)
+                    answer = result['text']
+                except Exception as exc:
+                    state.viewer.update_task(project_id, task['id'], status='failed', error=str(exc))
+                    raise
+            else:
+                answer = await run_in_threadpool(
+                    state.model.answer,
+                    current_messages,
+                )
         except Exception as exc:
             raise HTTPException(
                 status_code=500,

@@ -1,0 +1,683 @@
+diff --git a/crates/parasolid-core/src/brep/mapper.rs b/crates/parasolid-core/src/brep/mapper.rs
+index cf6a947..bbd2f6f 100644
+--- a/crates/parasolid-core/src/brep/mapper.rs
++++ b/crates/parasolid-core/src/brep/mapper.rs
+@@ -573,6 +573,10 @@ impl<'a> Mapper<'a> {
+                     )?,
+                 }
+             }
++            "SWEPT_SURF" => SurfaceKind::Swept {
++                section: self.required_id(node, "section", "curve geometry", &self.ids.curves)?,
++                sweep: self.vector(node, "sweep")?,
++            },
+             "SPUN_SURF" => SurfaceKind::Spun {
+                 profile: self.required_id(node, "profile", "curve geometry", &self.ids.curves)?,
+                 base: self.vector(node, "base")?,
+@@ -638,12 +642,21 @@ impl<'a> Mapper<'a> {
+             self.required_id_pair(node, "surface", "surface geometry", &self.ids.surfaces)?;
+         let boundary_surfaces =
+             self.optional_id_pair(node, "boundary", "surface geometry", &self.ids.surfaces)?;
++        let weights = &self.field(node, "thumb_weight")?.values;
++        self.validate_count(node, "thumb_weight", 2, weights.len())?;
++        let optional_weight = |value: &FieldValue| match value {
++            FieldValue::Double(None) => Ok(None),
++            FieldValue::Double(Some(v)) if v.is_finite() => Ok(Some(*v)),
++            _ => Err(self.invalid_geometry(node, "thumb_weight", "invalid blend weight")),
++        };
+         Ok(SurfaceKind::BlendedEdge {
+             blend_type,
+             supporting_surfaces,
+             spine_curve: self.required_id(node, "spine", "curve geometry", &self.ids.curves)?,
+             ranges: self.double_pair(node, "range")?,
+-            thumb_weights: self.double_pair(node, "thumb_weight")?,
++            // Degenerate cliff-edge construction blends can transmit null
++            // weights. Retain them; do not invent (1,1) geometry parameters.
++            thumb_weights: [optional_weight(&weights[0])?, optional_weight(&weights[1])?],
+             boundary_surfaces,
+             start: self.optional_source(node, "start")?,
+             end: self.optional_source(node, "end")?,
+@@ -761,7 +774,8 @@ impl<'a> Mapper<'a> {
+         let [start_points, end_points] = ["start", "end"].map(|field| {
+             let limit = self.required_typed_node(node, field, "LIMIT")?;
+             let count = match self.character(limit, "type")? {
+-                b'H' | b'L' => 1,
++                // Public XT reference: B is a spine boundary with one hvec.
++                b'H' | b'L' | b'B' => 1,
+                 b'T' => 2,
+                 _ => {
+                     return Err(self.invalid_geometry(
+diff --git a/crates/parasolid-core/src/brep/model.rs b/crates/parasolid-core/src/brep/model.rs
+index 282cc60..2b06fbe 100644
+--- a/crates/parasolid-core/src/brep/model.rs
++++ b/crates/parasolid-core/src/brep/model.rs
+@@ -556,7 +556,7 @@ pub enum SurfaceKind {
+         supporting_surfaces: [BrepId; 2],
+         spine_curve: BrepId,
+         ranges: [f64; 2],
+-        thumb_weights: [f64; 2],
++        thumb_weights: [Option<f64>; 2],
+         boundary_surfaces: [Option<BrepId>; 2],
+         start: Option<SourceNodeRef>,
+         end: Option<SourceNodeRef>,
+@@ -577,6 +577,8 @@ pub enum SurfaceKind {
+         end_parameter: Option<f64>,
+         x_axis: Option<Vector3>,
+     },
++    /// Linear extrusion R(u,v) = C(u) + v D (XT SWEPT_SURF).
++    Swept { section: BrepId, sweep: Vector3 },
+     /// Offset of another mapped surface.
+     Offset { basis_surface: BrepId, offset: f64 },
+     /// Exact NURBS definition assembled from auxiliary nodes.
+@@ -598,6 +600,7 @@ impl SurfaceKind {
+             Self::BlendedEdge { .. } => "blended_edge",
+             Self::BlendBoundary { .. } => "blend_boundary",
+             Self::Spun { .. } => "spun",
++            Self::Swept { .. } => "swept",
+             Self::Offset { .. } => "offset",
+             Self::Nurbs(_) => "nurbs",
+             Self::Unsupported { .. } => "unsupported",
+diff --git a/crates/parasolid-python/src/brep.rs b/crates/parasolid-python/src/brep.rs
+index b82b3ea..acc1ddc 100644
+--- a/crates/parasolid-python/src/brep.rs
++++ b/crates/parasolid-python/src/brep.rs
+@@ -570,6 +570,10 @@ fn surface_kind_to_python<'py>(
+             value.set_item("boundary_index", boundary_index)?;
+             value.set_item("blend_surface", blend_surface)?;
+         }
++        SurfaceKind::Swept { section, sweep } => {
++            value.set_item("section", section)?;
++            value.set_item("sweep", vector_tuple(*sweep))?;
++        }
+         SurfaceKind::Spun {
+             profile,
+             base,
+diff --git a/src/parasolid_kit/__init__.py b/src/parasolid_kit/__init__.py
+index dd68cf7..f868b30 100644
+--- a/src/parasolid_kit/__init__.py
++++ b/src/parasolid_kit/__init__.py
+@@ -56,6 +56,7 @@ from .brep import (
+     Shell,
+     SourceNodeRef,
+     SphereSurface,
++    SweptSurface,
+     SpunSurface,
+     SurfaceGeometry,
+     SurfaceKind,
+@@ -148,6 +149,7 @@ __all__ = [
+     "SourceLocation",
+     "SourceNodeRef",
+     "SphereSurface",
++    "SweptSurface",
+     "SpunSurface",
+     "SurfaceGeometry",
+     "SurfaceKind",
+diff --git a/src/parasolid_kit/brep/__init__.py b/src/parasolid_kit/brep/__init__.py
+index b9cb477..708f263 100644
+--- a/src/parasolid_kit/brep/__init__.py
++++ b/src/parasolid_kit/brep/__init__.py
+@@ -21,6 +21,7 @@ from .geometry import (
+     PlaneSurface,
+     PointGeometry,
+     SphereSurface,
++    SweptSurface,
+     SpunSurface,
+     SurfaceDefinition,
+     SurfaceGeometry,
+@@ -83,6 +84,7 @@ __all__ = [
+     "Shell",
+     "SourceNodeRef",
+     "SphereSurface",
++    "SweptSurface",
+     "SpunSurface",
+     "SurfaceDefinition",
+     "SurfaceGeometry",
+diff --git a/src/parasolid_kit/brep/_native.py b/src/parasolid_kit/brep/_native.py
+index 3183124..23d379e 100644
+--- a/src/parasolid_kit/brep/_native.py
++++ b/src/parasolid_kit/brep/_native.py
+@@ -28,6 +28,7 @@ from .geometry import (
+     PlaneSurface,
+     PointGeometry,
+     SphereSurface,
++    SweptSurface,
+     SpunSurface,
+     SurfaceDefinition,
+     SurfaceGeometry,
+@@ -378,6 +379,8 @@ def _surface_definition(kind: SurfaceKind, value: Mapping[str, Any]) -> SurfaceD
+             minor_radius=_float(value, "minor_radius"),
+             x_axis=_vector(value, "x_axis"),
+         )
++    if kind is SurfaceKind.SWEPT:
++        return SweptSurface(section=_int(value, "section"), sweep=_vector(value, "sweep"))
+     if kind is SurfaceKind.SPUN:
+         return SpunSurface(
+             profile=_int(value, "profile"),
+@@ -398,7 +401,7 @@ def _surface_definition(kind: SurfaceKind, value: Mapping[str, Any]) -> SurfaceD
+             supporting_surfaces=(supporting_surfaces[0], supporting_surfaces[1]),
+             spine_curve=_int(value, "spine_curve"),
+             ranges=_float_pair(value, "ranges"),
+-            thumb_weights=_float_pair(value, "thumb_weights"),
++            thumb_weights=_optional_float_pair(value, "thumb_weights"),
+             boundary_surfaces=_optional_int_pair(value, "boundary_surfaces"),
+             start=None if value.get("start") is None else _source(value.get("start")),
+             end=None if value.get("end") is None else _source(value.get("end")),
+@@ -589,6 +592,14 @@ def _float_pair(value: Mapping[str, Any], key: str) -> tuple[float, float]:
+     return (item[0], item[1])
+ 
+ 
++def _optional_float_pair(value: Mapping[str, Any], key: str) -> tuple[float | None, float | None]:
++    item = value.get(key)
++    if (not isinstance(item, tuple) or len(item) != 2 or any(
++        part is not None and (isinstance(part, bool) or not isinstance(part, float)) for part in item)):
++        raise RuntimeError(f"native B-Rep field {key!r} is not an optional-float pair")
++    return (item[0], item[1])
++
++
+ def _optional_int_pair(value: Mapping[str, Any], key: str) -> tuple[int | None, int | None]:
+     item = value.get(key)
+     if (
+diff --git a/src/parasolid_kit/brep/geometry.py b/src/parasolid_kit/brep/geometry.py
+index d680752..2547881 100644
+--- a/src/parasolid_kit/brep/geometry.py
++++ b/src/parasolid_kit/brep/geometry.py
+@@ -32,6 +32,7 @@ class SurfaceKind(str, Enum):
+     CONE = "cone"
+     SPHERE = "sphere"
+     TORUS = "torus"
++    SWEPT = "swept"
+     SPUN = "spun"
+     BLENDED_EDGE = "blended_edge"
+     BLEND_BOUNDARY = "blend_boundary"
+@@ -217,6 +218,14 @@ class TorusSurface:
+     x_axis: Vector3
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class SweptSurface:
++    """Exact linear extrusion of a section curve along a unit sweep vector."""
++
++    section: int
++    sweep: Vector3
++
++
+ @dataclass(frozen=True, slots=True)
+ class SpunSurface:
+     """Surface of revolution of a profile curve about an axis (XT SPUN_SURF)."""
+@@ -239,7 +248,7 @@ class BlendedEdgeSurface:
+     supporting_surfaces: tuple[int, int]
+     spine_curve: int
+     ranges: tuple[float, float]
+-    thumb_weights: tuple[float, float]
++    thumb_weights: tuple[float | None, float | None]
+     boundary_surfaces: tuple[int | None, int | None]
+     start: SourceNodeRef | None
+     end: SourceNodeRef | None
+@@ -288,6 +297,7 @@ SurfaceDefinition: TypeAlias = (
+     | ConeSurface
+     | SphereSurface
+     | TorusSurface
++    | SweptSurface
+     | SpunSurface
+     | BlendedEdgeSurface
+     | BlendBoundarySurface
+diff --git a/src/parasolid_kit/interop/occt/conversion.py b/src/parasolid_kit/interop/occt/conversion.py
+index 9437a38..47157cf 100644
+--- a/src/parasolid_kit/interop/occt/conversion.py
++++ b/src/parasolid_kit/interop/occt/conversion.py
+@@ -25,6 +25,7 @@ from ...brep.geometry import (
+     ParabolaCurve,
+     PlaneSurface,
+     SphereSurface,
++    SweptSurface,
+     SpunSurface,
+     SurfaceKind,
+     SurfaceParametricCurve,
+@@ -706,6 +707,7 @@ def _supported_surface_definition(kind: SurfaceKind, definition: object) -> bool
+                 (SurfaceKind.CONE, ConeSurface),
+                 (SurfaceKind.SPHERE, SphereSurface),
+                 (SurfaceKind.TORUS, TorusSurface),
++                (SurfaceKind.SWEPT, SweptSurface),
+                 (SurfaceKind.SPUN, SpunSurface),
+                 (SurfaceKind.NURBS, NurbsSurface),
+                 (SurfaceKind.OFFSET, OffsetSurface),
+@@ -856,8 +858,10 @@ def _nurbs_surface_issue(definition: NurbsSurface) -> str | None:
+         or definition.v_degree >= definition.v_control_vertex_count
+     ):
+         return "degree is outside its valid control-point range"
+-    if any(len(values) != 3 for values in definition.control_vertices):
+-        return "control vertices must contain exactly three coordinates"
++    if any(len(values) != definition.vertex_dimension for values in definition.control_vertices):
++        return "control vertices must match the declared dimension"
++    if definition.rational and any(values[-1] <= 0 for values in definition.control_vertices):
++        return "rational weights must be positive"
+     if any(not isfinite(value) for values in definition.control_vertices for value in values):
+         return "control vertices must be finite"
+     u_issue = _nurbs_knot_issue(
+diff --git a/src/parasolid_kit/interop/occt/geometry.py b/src/parasolid_kit/interop/occt/geometry.py
+index b22f8f0..48c4a23 100644
+--- a/src/parasolid_kit/interop/occt/geometry.py
++++ b/src/parasolid_kit/interop/occt/geometry.py
+@@ -23,6 +23,7 @@ from ...brep.geometry import (
+     ParabolaCurve,
+     PlaneSurface,
+     SphereSurface,
++    SweptSurface,
+     SpunSurface,
+     SurfaceDefinition,
+     TorusSurface,
+@@ -108,6 +109,8 @@ class GeometryFactory:
+         end_vertex: object,
+         start_position: Vector3,
+         end_position: Vector3,
++        *,
++        source_tolerance: float = 0.0,
+     ) -> object:
+         from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeEdge
+ 
+@@ -121,7 +124,9 @@ class GeometryFactory:
+         segment_length = _magnitude(
+             tuple(right - left for left, right in zip(start, end, strict=True))
+         )
+-        tolerance = self.options.validation.linear_threshold(segment_length)
++        if not isfinite(source_tolerance) or source_tolerance < 0:
++            raise ValueError("line source tolerance must be finite and non-negative")
++        tolerance = max(self.options.validation.linear_threshold(segment_length), source_tolerance)
+         if segment_length <= tolerance:
+             raise ValueError("line edge endpoints must be distinct")
+         for name, point in (("start", start), ("end", end)):
+@@ -427,7 +432,7 @@ class GeometryFactory:
+                 raise ValueError("NURBS curve is flagged closed but its ends do not meet")
+         return result
+ 
+-    def parameter_curve(self, curve: NurbsCurve, surface: SurfaceDefinition) -> object:
++    def parameter_curve(self, curve: NurbsCurve, surface: SurfaceDefinition, *, section: CurveDefinition | None = None) -> object:
+         """Embed open nonrational 2D poles using the support's parameter units."""
+         from OCP.Geom2d import Geom2d_BSplineCurve
+         from OCP.gp import gp_Pnt2d
+@@ -438,8 +443,16 @@ class GeometryFactory:
+         self._validate_nurbs_curve(curve, parameter=True)
+         if isinstance(surface, PlaneSurface):
+             u_scale, v_scale = self.scale, self.scale
+-        elif isinstance(surface, (CylinderSurface, ConeSurface)):
++        elif isinstance(surface, CylinderSurface):
+             u_scale, v_scale = 1.0, self.scale
++        elif isinstance(surface, ConeSurface):
++            u_scale, v_scale = 1.0, self.scale / surface.cos_half_angle
++        elif isinstance(surface, SweptSurface):
++            if section is None:
++                raise ValueError("swept parameter curve requires section definition")
++            u_scale, v_scale = (self.scale if isinstance(section, LineCurve) else 1.0), self.scale
++        elif isinstance(surface, SpunSurface):
++            u_scale, v_scale = 1.0, 1.0
+         elif isinstance(surface, (SphereSurface, TorusSurface, NurbsSurface)):
+             u_scale, v_scale = 1.0, 1.0
+         else:
+@@ -451,6 +464,8 @@ class GeometryFactory:
+         for index, values in enumerate(curve.control_vertices, 1):
+             weight = values[2] if curve.rational else 1.0
+             u, v = values[0] / weight, values[1] / weight
++            if isinstance(surface, SpunSurface):
++                u, v = -v, u
+             poles.SetValue(index, gp_Pnt2d(u * u_scale, v * v_scale))
+             weights.SetValue(index, weight)
+         knots = _real_array(curve.knots)
+@@ -510,6 +525,13 @@ class GeometryFactory:
+             return Geom_ToroidalSurface(self.torus(definition, ring_only=False))
+         if isinstance(definition, NurbsSurface):
+             return self.nurbs_surface(definition)
++        if isinstance(definition, SweptSurface):
++            from OCP.Geom import Geom_SurfaceOfLinearExtrusion
++            if resolve_curve is None:
++                raise ValueError("swept surface requires its section curve")
++            return Geom_SurfaceOfLinearExtrusion(
++                resolve_curve(definition.section), self.direction(definition.sweep, role="sweep direction")
++            )
+         if isinstance(definition, SpunSurface):
+             return self.spun_surface(definition, resolve_curve)
+         if isinstance(definition, BlendedEdgeSurface):
+@@ -519,9 +541,19 @@ class GeometryFactory:
+         if isinstance(definition, OffsetSurface):
+             if not isfinite(definition.offset):
+                 raise ValueError("offset surface distance must be finite")
++            basis = resolve_basis(definition.basis_surface)
++            # A multiple profile knot may change derivative magnitude while
++            # preserving the tangent and hence the offset normal. OCCT checks
++            # parametric C1 by default; permit C0 only after a one-sided G1 test.
++            from OCP.GeomAbs import GeomAbs_C0
++            checked_g1 = False
++            if basis.Continuity() == GeomAbs_C0:
++                _check_offset_profile_g1(basis)
++                checked_g1 = True
+             return Geom_OffsetSurface(
+-                resolve_basis(definition.basis_surface),
++                basis,
+                 definition.offset * self.scale,
++                checked_g1,
+             )
+         raise ValueError(f"unsupported exact surface definition: {type(definition).__name__}")
+ 
+@@ -928,4 +960,96 @@ def _validate_knot_vector(
+         raise ValueError(f"{role} knot multiplicities must be positive")
+ 
+ 
++def _check_offset_profile_g1(surface: object) -> None:
++    """Check every internal profile knot, without changing the source spline.
++
++    Extrusion/revolution profiles and non-rational tensor surfaces with
++    proportional derivative control nets are supported. Other C0 surfaces
++    and actual creases remain rejected.
++    """
++    from OCP.Geom import (
++        Geom_BSplineCurve,
++        Geom_BSplineSurface,
++        Geom_SurfaceOfLinearExtrusion,
++        Geom_SurfaceOfRevolution,
++    )
++    from OCP.gp import gp_Pnt, gp_Vec
++
++    if isinstance(surface, Geom_BSplineSurface):
++        _check_offset_tensor_g1(surface)
++        return
++    if not isinstance(surface, (Geom_SurfaceOfLinearExtrusion, Geom_SurfaceOfRevolution)):
++        raise ValueError("C0 offset basis requires a verified G1 spline profile")
++    curve = surface.BasisCurve()
++    if not isinstance(curve, Geom_BSplineCurve):
++        raise ValueError("C0 offset basis requires a B-spline profile")
++    for index in range(2, curve.NbKnots()):
++        if curve.Multiplicity(index) < curve.Degree():
++            continue
++        left, right = gp_Pnt(), gp_Pnt()
++        dl, dr = gp_Vec(), gp_Vec()
++        parameter = curve.Knot(index)
++        curve.LocalD1(parameter, index - 1, index, left, dl)
++        curve.LocalD1(parameter, index, index + 1, right, dr)
++        if (
++            left.Distance(right) > 1e-12
++            or min(dl.Magnitude(), dr.Magnitude()) <= 1e-14
++            or dl.Angle(dr) > 1e-9
++        ):
++            raise ValueError(f"offset profile has a non-G1 join at knot {index}")
++    if curve.IsPeriodic():
++        # Periodic C0 seam checking has not yet been implemented.
++        raise ValueError("periodic C0 offset profile requires a verified seam")
++
++
++def _check_offset_tensor_g1(surface: object) -> None:
++    """Certify non-rational C0 joins by their entire derivative control net.
++
++    At multiplicity = degree the seam interpolates one control row. If every
++    transverse derivative control vector on the right is the same positive
++    multiple of its left counterpart, the derivative curves are proportional
++    for every point of the seam, not just at sampled parameters.
++    """
++    if surface.IsURational() or surface.IsVRational():
++        raise ValueError("rational C0 offset tensor requires a verified G1 join")
++    if surface.IsUPeriodic() or surface.IsVPeriodic():
++        raise ValueError("periodic C0 offset tensor requires a verified seam")
++    for along_u in (True, False):
++        degree = surface.UDegree() if along_u else surface.VDegree()
++        count = surface.NbUKnots() if along_u else surface.NbVKnots()
++        multiplicity = surface.UMultiplicity if along_u else surface.VMultiplicity
++        across = surface.NbVPoles() if along_u else surface.NbUPoles()
++        cumulative = multiplicity(1)
++        for index in range(2, count):
++            mult = multiplicity(index)
++            cumulative += mult
++            if mult < degree:
++                continue
++            if mult > degree:
++                raise ValueError("offset tensor has a discontinuous internal seam")
++            seam = cumulative - degree
++            ratio = None
++            for row in range(1, across + 1):
++                def pole(column):
++                    return surface.Pole(column, row) if along_u else surface.Pole(row, column)
++                left = tuple(b-a for a,b in zip(pole(seam-1).Coord(),pole(seam).Coord(),strict=True))
++                right = tuple(b-a for a,b in zip(pole(seam).Coord(),pole(seam+1).Coord(),strict=True))
++                length = _magnitude(left)
++                other = _magnitude(right)
++                if max(length, other) <= 1e-14:
++                    continue
++                if min(length, other) <= 1e-14:
++                    raise ValueError("offset tensor has a singular G1 control vector")
++                current = sum(a*b for a,b in zip(left,right,strict=True)) / length**2
++                if current <= 0:
++                    raise ValueError("offset tensor has a non-G1 join")
++                if ratio is None:
++                    ratio = current
++                residual = _magnitude(tuple(b-ratio*a for a,b in zip(left,right,strict=True)))
++                if residual > 1e-9*max(other, ratio*length):
++                    raise ValueError("offset tensor has a non-G1 derivative control net")
++            if ratio is None:
++                raise ValueError("offset tensor has a degenerate seam")
++
++
+ __all__ = ["GeometryFactory"]
+diff --git a/src/parasolid_kit/interop/occt/intersection.py b/src/parasolid_kit/interop/occt/intersection.py
+index 45da744..58fe990 100644
+--- a/src/parasolid_kit/interop/occt/intersection.py
++++ b/src/parasolid_kit/interop/occt/intersection.py
+@@ -36,15 +36,70 @@ def _cross(a: tuple, b: tuple) -> tuple:
+     return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+ 
+ 
++def project_surface(point: object, surface: object, tolerance: float) -> tuple:
++    """Stable closest point/normal for elementary supports and kernel projection otherwise.
++
++    An almost-flat cone has a distant apex and badly conditioned kernel UV
++    projection. Work in its radial/axial meridian without subtracting the apex.
++    Both nappes are considered; no source angle or geometry is replaced.
++    """
++    from math import sin, cos, sqrt
++    from OCP.Geom import Geom_ConicalSurface, Geom_CylindricalSurface
++    from OCP.GeomAPI import GeomAPI_ProjectPointOnSurf
++    from OCP.gp import gp_Pnt, gp_Vec
++
++    if isinstance(surface, (Geom_ConicalSurface, Geom_CylindricalSurface)):
++        frame = surface.Position()
++        axis = frame.Direction().Coord()
++        origin = frame.Location().Coord()
++        offset = tuple(x - y for x, y in zip(point.Coord(), origin, strict=True))
++        axial = _dot(offset, axis)
++        radial = tuple(offset[i] - axial * axis[i] for i in range(3))
++        rho = sqrt(_dot(radial, radial))
++        if rho > 1e-14:
++            direction = tuple(x / rho for x in radial)
++            if isinstance(surface, Geom_CylindricalSurface):
++                q = gp_Pnt(
++                    *(
++                        origin[i] + axial * axis[i] + surface.Radius() * direction[i]
++                        for i in range(3)
++                    )
++                )
++                return q, direction, abs(rho - surface.Radius())
++            sine, cosine = sin(surface.SemiAngle()), cos(surface.SemiAngle())
++            candidates = []
++            for sign in (1.0, -1.0):
++                meridian = (sign * rho - surface.RefRadius()) * sine + axial * cosine
++                radius = surface.RefRadius() + meridian * sine
++                q = gp_Pnt(
++                    *(
++                        origin[i] + meridian * cosine * axis[i] + sign * radius * direction[i]
++                        for i in range(3)
++                    )
++                )
++                normal = tuple(sign * cosine * direction[i] - sine * axis[i] for i in range(3))
++                candidates.append((q, normal, point.Distance(q)))
++            return min(candidates, key=lambda result: result[2])
++    operation = GeomAPI_ProjectPointOnSurf(point, surface, tolerance)
++    if not operation.NbPoints():
++        raise ValueError("intersection point/surface projection failed")
++    u, v = operation.LowerDistanceParameters()
++    q, du, dv = gp_Pnt(), gp_Vec(), gp_Vec()
++    surface.D1(u, v, q, du, dv)
++    normal = du.Crossed(dv)
++    normal.Normalize()
++    return q, normal.Coord(), operation.LowerDistance()
++
++
+ def fit_intersection(surfaces: list, samples: list, anchors: list, tolerance: float) -> object:
+-    """Refine an open branch within the source body's linear resolution.
++    """Refine a source branch within the source body's linear resolution.
+ 
+     Every interpolation span is checked against both surfaces at three interior
+-    parameters. Failed spans receive corrected chord samples. Twelve rounds and
++    parameters. Failed fits receive balanced, support-corrected samples. Twelve rounds and
+     10,000 points bound the solver; failure never returns an unchecked fit.
+     """
+-    from OCP.GeomAPI import GeomAPI_Interpolate, GeomAPI_ProjectPointOnSurf
+-    from OCP.gp import gp_Pnt, gp_Vec
++    from OCP.GeomAPI import GeomAPI_Interpolate
++    from OCP.gp import gp_Pnt
+     from OCP.TColgp import TColgp_HArray1OfPnt
+ 
+     numerical = max(1e-14, tolerance * 1e-4)
+@@ -52,22 +107,14 @@ def fit_intersection(surfaces: list, samples: list, anchors: list, tolerance: fl
+         raise ValueError("intersection input exceeds 10000 points")
+ 
+     def project(point: object, surface: object) -> tuple:
+-        operation = GeomAPI_ProjectPointOnSurf(point, surface, numerical)
+-        if not operation.NbPoints():
+-            raise ValueError("intersection point/surface projection failed")
+-        u, v = operation.LowerDistanceParameters()
+-        q, du, dv = gp_Pnt(), gp_Vec(), gp_Vec()
+-        surface.D1(u, v, q, du, dv)
+-        normal = du.Crossed(dv)
+-        normal.Normalize()
+-        return q, normal.Coord(), operation.LowerDistance()
++        return project_surface(point, surface, numerical)
+ 
+     def refine(point: object, tangent: tuple) -> object:
+         anchor = point.Coord()
+         for _ in range(30):
+             q1, n1, d1 = project(point, surfaces[0])
+             q2, n2, d2 = project(point, surfaces[1])
+-            if max(d1, d2) <= tolerance:
++            if max(d1, d2) <= tolerance / 16:
+                 return point
+             xyz = point.Coord()
+             rhs = [
+@@ -122,7 +169,6 @@ def fit_intersection(surfaces: list, samples: list, anchors: list, tolerance: fl
+                 ordered.append((parameter, point))
+             points = [item[1] for item in sorted(ordered, key=lambda item: item[0])]
+             continue
+-        refined = []
+         worst = 0.0
+         spans = list(pairwise(points))
+         if closed:
+@@ -132,22 +178,30 @@ def fit_intersection(surfaces: list, samples: list, anchors: list, tolerance: fl
+             b, _ = project_curve(curve, right)
+             if closed and b <= a:
+                 b += curve.Period()
+-            refined.append(left)
+             for fraction in (0.25, 0.5, 0.75):
+                 point = curve.Value(a + (b - a) * fraction)
+                 distance = max(project(point, surface)[2] for surface in surfaces)
+                 worst = max(worst, distance)
+-                if distance > tolerance:
+-                    chord = tuple(y - x for x, y in zip(left.Coord(), right.Coord(), strict=True))
+-                    magnitude = _dot(chord, chord) ** 0.5
+-                    if magnitude <= numerical:
+-                        raise ValueError("intersection refinement has a degenerate interval")
+-                    seed = gp_Pnt(
+-                        *(x + d * fraction for x, d in zip(left.Coord(), chord, strict=True))
+-                    )
+-                    refined.append(refine(seed, tuple(x / magnitude for x in chord)))
+         if worst <= tolerance:
+             return curve
++        # A periodic interpolant couples neighboring spans. Refining only the
++        # failing span moves its overshoot to the next unrefined span and can
++        # fail forever even for a circle. Refine the whole sampled branch
++        # against both supports so density remains balanced.
++        refined = []
++        for left, right in spans:
++            a, _ = project_curve(curve, left)
++            b, _ = project_curve(curve, right)
++            if closed and b <= a:
++                b += curve.Period()
++            refined.append(left)
++            chord = tuple(y - x for x, y in zip(left.Coord(), right.Coord(), strict=True))
++            magnitude = _dot(chord, chord) ** 0.5
++            if magnitude <= numerical:
++                raise ValueError("intersection refinement has a degenerate interval")
++            tangent = tuple(x / magnitude for x in chord)
++            for fraction in (0.25, 0.5, 0.75):
++                refined.append(refine(curve.Value(a + (b - a) * fraction), tangent))
+         if not closed:
+             refined.append(points[-1])
+         points = refined
+diff --git a/src/parasolid_kit/interop/occt/parametric.py b/src/parasolid_kit/interop/occt/parametric.py
+index 7ee5b99..74ca07f 100644
+--- a/src/parasolid_kit/interop/occt/parametric.py
++++ b/src/parasolid_kit/interop/occt/parametric.py
+@@ -41,6 +41,7 @@ from ...brep.geometry import (
+     LineCurve,
+     NurbsCurve,
+     OffsetSurface,
++    SweptSurface,
+     PlaneSurface,
+     SphereSurface,
+     SurfaceParametricCurve,
+@@ -286,7 +287,9 @@ class ParametricTopologyBuilder(TopologyBuilder):
+                 raise ValueError("offset surface basis chain is circular")
+             seen.add(support.basis_surface)
+             support = self.surfaces[support.basis_surface].definition
+-        return self.geometry.parameter_curve(curve, support)
++        return self.geometry.parameter_curve(curve, support, section=(
++            self.curves[support.section].definition if isinstance(support, SweptSurface) else None
++        ))
+ 
+     def _surface_trim(self, curve_id):
+         definition = None if curve_id is None else self.curves[curve_id].definition
+@@ -362,6 +365,7 @@ class ParametricTopologyBuilder(TopologyBuilder):
+                     ve,
+                     self.points[self.vertices[edge.start_vertex].point].position,
+                     self.points[self.vertices[edge.end_vertex].point].position,
++                    source_tolerance=max(tolerance, BRep_Tool.Tolerance_s(vs), BRep_Tool.Tolerance_s(ve)),
+                 )
+                 return
+             trimmed_parameter = self._surface_trim(edge.curve)
+@@ -412,6 +416,16 @@ class ParametricTopologyBuilder(TopologyBuilder):
+                         )
+                 elif isinstance(basis.definition, LineCurve):
+                     a, b = a * self.geometry.scale, b * self.geometry.scale
++                if not curve.IsPeriodic():
++                    first, last = curve.FirstParameter(), curve.LastParameter()
++                    def clamp(parameter):
++                        bounded = max(first, min(last, parameter))
++                        if bounded != parameter:
++                            if curve.Value(bounded).Distance(curve.Value(parameter)) > tolerance:
++                                raise ValueError(f"edge {edge.id} trim exceeds its basis range")
++                            self.operations.append("clamp_endpoint_within_source_tolerance")
++                        return bounded
++                    a, b = clamp(a), clamp(b)
+                 for parameter, point in ((a, definition.start_point), (b, definition.end_point)):
+                     if curve.Value(parameter).Distance(self.geometry.point(point)) > tolerance:
+                         raise ValueError(
+diff --git a/src/parasolid_kit/interop/occt/topology.py b/src/parasolid_kit/interop/occt/topology.py
+index 436c60e..bf6d11d 100644
+--- a/src/parasolid_kit/interop/occt/topology.py
++++ b/src/parasolid_kit/interop/occt/topology.py
+@@ -2,7 +2,7 @@
+ 
+ from __future__ import annotations
+ 
+-from dataclasses import dataclass
++from dataclasses import dataclass, replace
+ from math import pi, sqrt
+ 
+ from ...brep.geometry import (
+@@ -722,8 +722,12 @@ class TopologyBuilder:
+             raise ValueError(f"surface basis {surface_id} is missing")
+         self._resolving_surfaces.add(surface_id)
+         try:
++            definition = surface.definition
++            if isinstance(definition, OffsetSurface):
++                definition = replace(definition, offset=definition.offset *
++                                     _sense_sign(self.surfaces[definition.basis_surface].sense))
+             result = self.geometry.surface3d(
+-                surface.definition,
++                definition,
+                 resolve_basis=self._surface_geometry,
+                 resolve_curve=self._curve_geometry,
+             )

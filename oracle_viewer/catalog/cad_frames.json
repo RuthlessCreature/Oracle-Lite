@@ -1,0 +1,32 @@
+{
+  "schema": "oracle-cad-frames-v1",
+  "frames": {
+    "MECH-EYE-PRO-S-ENHANCED-V3-FOV": {
+      "status": "verified_from_vendor_fov_geometry",
+      "source_file": "MM-CAD-c06d9041d3ec89a79128.step",
+      "source_sha256": "c06d9041d3ec89a79128d5adfdc3e393d011b0f1716fd9d1c5f7de363466f926",
+      "optical_axis_local": [0.0, 0.0, 1.0],
+      "evidence": "Original manufacturer camera+FOV STEP: volume-weighted centroid of the 41 non-FOV camera solids is (-102.941, 6.551, -438.139) mm; the three separated FOV solids are centered at (-97.402, 0.582, 386.159) mm. Their principal separation is +Z in the preserved source coordinate frame. Derived camera-only STEP retains this source frame.",
+      "limitations": "Source FOV volumes establish boresight direction, not mounting datum or collision envelope."
+    },
+    "MV-CS050-10GM": {
+      "status": "verified_from_vendor_interface_geometry",
+      "source_file": "MV-CS050-10GMGC-family.step",
+      "source_sha256": "22fa3fee0ecf21cc08f9e90f376fd38e682bf3ed3bbfb8a2843660244b32a817",
+      "optical_axis_local": [0.0, 0.0, -1.0],
+      "axis_point_local_mm": [0.0, 0.0, -18.15],
+      "image_x_axis_local": [1.0, 0.0, 0.0],
+      "mount_interface": "C-mount",
+      "evidence": "Downloaded product-linked STEP has a planar end face at local z=-18.15 mm centered at (0,0,-18.15) and concentric C-mount interface cylinders (radius 12.35 mm, common Z axis). The manufacturer datasheet/product records specify C-mount. Optical axis is directed out through this interface, along local -Z.",
+      "limitations": "CAD is GMGC variant attached to MV-CS050-10GM listing; verify ordering suffix and housing revision before manufacture."
+    },
+    "GU-660402-W": {
+      "status": "candidate_face_not_authorized_for_pose",
+      "source_file": "GU-CAD-5bcac5e1fae9862e41e3.step",
+      "source_sha256": "5bcac5e1fae9862e41e303b8501c73d88cd98dfc23a2c9afed331f47f4e47db3",
+      "emission_axis_local": [0.0, 0.0, 1.0],
+      "evidence": "Largest candidate active face normal is +Z and its dimensions are close to the catalog active area.",
+      "limitations": "Supplier CAD does not label the emitting face; pose is blocked until the active-face identity is confirmed."
+    }
+  }
+}

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>工程进展 · Oracle Viewer</title><link rel="stylesheet" href="/viewer-static/progress.css"></head>
+<body>
+<header><a class="brand" href="/viewer"><b class="logo">O</b><span>ORACLE <strong>VIEWER</strong><small>工程进展</small></span></a><div class="head-right"><span id="connection" role="status">连接服务…</span><a class="button" href="/viewer">打开 Viewer ↗</a></div></header>
+<main>
+<section class="intro"><div><p class="eyebrow">本地模型 · 自动配准与 FAI 标记</p><h1>FAI 自动标记进展</h1><p class="sub">查看当前任务、实际标记数量，以及还没解决的测量项。每 5 秒同步任务状态。</p></div><button id="refresh" type="button">立即刷新 ↻</button></section>
+<div id="error" role="alert" hidden></div>
+<section class="totals" aria-label="整体进展"><div><span>已标记 / 全部 FAI</span><strong id="total-marked">—</strong><small>按当前实际标记统计</small></div><div><span>仍未标记</span><strong id="total-pending">—</strong><small>保持原项，不以代表点代替整组</small></div><div><span>正在处理</span><strong id="active-projects">—</strong><small id="active-description">等候服务状态</small></div><div><span>自托管推理服务</span><strong id="model-state" class="model-value">—</strong><small id="model-name">读取模型信息…</small></div></section>
+<section class="panel" aria-label="云端模型训练"><div class="section-heading"><h2>云端模型训练</h2><span id="cloud-training-state">读取训练记录…</span></div><p id="cloud-training-progress" role="status">正在同步云端进程。</p><p id="cloud-training-data" class="sub"></p><p id="cloud-training-validation" class="sub"></p><p id="cloud-training-gpu" class="sub"></p><p class="sub">XML 是根据虚拟拍摄图和测量方案生成的最终产物。训练输入为 MSOP 图文；本轮专项范围与样本数见上方实时记录。清单读取、FAI 几何配准、方案质量和 XML 输出分别验证。</p></section>
+<div class="section-heading"><h2>项目状态</h2><span id="last-update">尚未同步</span></div>
+<div id="projects" aria-live="polite"><div class="empty">正在读取 Viewer 项目…</div></div>
+<section class="panel strategy-panel"><div class="section-heading"><h2>测量方法分类与处理路线</h2><span id="strategy-progress">读取本地模型分类…</span></div><p class="sub">将已有标记和未解决项按同一套方法分类。已有标记不等于正确真值；分类与路线均由本地模型判断。</p><label class="strategy-view-label">查看方式 <select id="strategy-view" aria-label="分类查看方式"><option value="method">全部 FAI · 按测量方法与证据</option><option value="failure">未标记项 · 按失败原因</option><option value="route">未标记项 · 按下一步路线</option></select></label><p id="method-update" class="sub"></p><div id="strategy-groups" class="strategy-groups"></div><div id="strategy-trials"></div></section>
+<section class="lower"><div class="panel"><div class="section-heading"><h2>最近变化</h2><span>本浏览器观察记录</span></div><ol id="changes" class="changes"><li class="muted">同步后开始记录；不会补写未观察到的历史进度。</li></ol></div><div class="panel notes"><h2>这些数字怎么理解</h2><p><b>已标记</b>表示模型已写入位置，不能据此认定位置全部正确，更不代表计量验收。</p><p><b>本轮已核对</b>是当前批次处理数量，包括通过和未通过的项目，与总标记数分别统计。</p><p>复核未通过时，标记可能撤回，因此覆盖率也可能下降。未标记项会保留原因和原文入口。</p><p id="scope-note">正在确认项目范围…</p><p>此页只读取状态，不会启动、取消或重复提交推理任务。</p></div></section>
+<footer><span>数据来自正在运行的 Oracle Viewer 服务</span><span id="fetch-state">—</span></footer>
+</main>
+<script type="module" src="/viewer-static/progress.js"></script>
+</body></html>

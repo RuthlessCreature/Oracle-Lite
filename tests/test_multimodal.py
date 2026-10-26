@@ -83,3 +83,43 @@ def test_large_pdf_page_is_rasterized_with_pixel_ceiling(tmp_path: Path):
     with Image.open(image_path) as image:
         width, height = image.size
     assert width * height <= 1_048_576 + 4096
+
+
+def test_pdf_table_fields_keep_geometric_row_relationships(tmp_path):
+    from oracle_lite.pdf_layout import extract_pdf_text
+
+    pdf = fitz.open()
+    page = pdf.new_page()
+    labels = [('Pressure', '12 kPa'), ('Temperature', '90 C'), ('Revision', 'B')]
+    # Labels and values are written in separate passes, as in many exported PDFs.
+    for i, (label, value) in enumerate(labels):
+        page.insert_text((40, 50 + i * 24), label)
+    for i, (label, value) in enumerate(labels):
+        page.insert_text((200, 50 + i * 24), value)
+    text = extract_pdf_text(page)
+    lines = text.splitlines()
+    assert len(lines) == 3
+    for line, (label, value) in zip(lines, labels):
+        assert label in line and value in line
+    pdf.close()
+
+
+def test_pdf_positioned_blocks_keep_identifiers_separate_from_measurements():
+    from oracle_lite.pdf_layout import extract_pdf_positioned_blocks
+
+    pdf = fitz.open()
+    page = pdf.new_page(width=400, height=300)
+    page.insert_text((40, 60), "8 SPOTS PER NUT")
+    page.insert_text((40, 74), "MAX WELD HEIGHT 0.05")
+    page.insert_text((230, 60), "FAI")
+    page.insert_text((231, 72), "54")
+    blocks = extract_pdf_positioned_blocks(page)
+    identifiers = [block for block in blocks if block["kind"] == "identifier"]
+    measurements = [block for block in blocks if block["kind"] == "text"]
+
+    assert any("FAI 54" in block["text"] for block in identifiers)
+    assert any("8 SPOTS PER NUT" in block["text"] and "0.05" in block["text"]
+               for block in measurements)
+    assert not any("FAI 54" in block["text"] for block in measurements)
+    assert all(0 <= block["x"] <= 100 and 0 <= block["y"] <= 100 for block in blocks)
+    pdf.close()
