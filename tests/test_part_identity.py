@@ -52,6 +52,20 @@ def test_xyz_missing_point_search_bounds_candidates_per_view_for_complete_fai_co
     assert counts and max(counts.values())<=6
 
 
+def test_large_direct_point_group_expands_candidate_pool_per_view(monkeypatch):
+    import oracle_viewer.local_matching as matching
+    limits=[]
+    def candidates(_mesh,**kwargs):
+        limits.append(kwargs['max_candidates_per_view'])
+        return [{'id':index,'view_id':'+Z','uv':[index/20,.5],
+            'face_id':'face','position':[index,0,0]} for index in range(1,kwargs['max_candidates_per_view']+1)]
+    monkeypatch.setattr(matching,'distributed_surface_view_candidates',candidates)
+    options=matching._source_visual_search_candidates(mesh(),[f'PNT_{index}' for index in range(12)])
+    counts={row['view_id'] for row in options}
+    assert limits==[12]
+    assert counts=={'+Z'} and len(options)==12*12
+
+
 def test_visual_surface_candidates_are_scoped_to_each_source_point_host():
     options=_source_visual_search_candidates(mesh(),['P_LEFT','P_RIGHT'],
         allowed_face_ids_by_source_name={'P_LEFT':{'left'},'P_RIGHT':{'right'}})
