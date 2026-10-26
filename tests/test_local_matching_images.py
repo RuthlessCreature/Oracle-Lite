@@ -610,8 +610,10 @@ def test_numbered_point_pairs_without_ellipsis_do_not_invent_intermediate_relati
 def test_two_point_visual_chunk_uses_bounded_compact_generation():
     class LocalModel:
         max_new_tokens=None
+        prompt=''
         def _generate_once(self,messages,**kwargs):
             self.max_new_tokens=kwargs['max_new_tokens']
+            self.prompt=messages[0]['content']
             markers=[{'source_point_names':[name],'feature':name,'view_id':view,
                 'uv':[.4,.6],'source_pages':[14],'candidate_id':f'C{index}'}
                 for index,(name,view) in enumerate((('THICK_J01','+Z'),('THICK_A01','-Z')),1)]
@@ -621,14 +623,21 @@ def test_two_point_visual_chunk_uses_bounded_compact_generation():
     model=LocalModel()
     candidates=[{'id':index,'view_id':view,'uv':[.4,.6],
         'source_point_names':[name],'position':[0.,0.,float(index)]}
-        for index,(name,view) in enumerate((('THICK_J01','+Z'),('THICK_A01','-Z')),1)]
+        for index,(name,view) in enumerate((('THICK_J01','+Z'),('THICK_A01','-Z'),
+                                            ('THICK_J06','+Z')),1)]
+    global_points=[{'name':f'THICK_J{i:02}','source_coordinates_2d':{
+        'axes':['X','Y'],'values':[float(i),float(i*i)],'page':14,'coordinate_system':'ALI_ABC'}}
+        for i in range(1,7)]
     result,_,truncated,_,_,_=_request_visual_marker_chunk(model,
         {'role':'user','content':'Locate this MSOP pair.','attachments':[]},fai=9,
         expected_names=['THICK_J01','THICK_A01'],
         source_points=[{'name':'THICK_J01'},{'name':'THICK_A01'}],
-        allowed_source_pages={14},surface_candidates=candidates)
+        allowed_source_pages={14},surface_candidates=candidates,
+        global_source_points=global_points)
     assert result and not truncated
     assert model.max_new_tokens==1024
+    assert 'THICK_J06' in model.prompt
+    assert 'Exact CAD candidate geometry' in model.prompt
 
 
 def test_literal_msop_xy_rows_are_attached_without_fabricating_z_and_identify_z_pairs():
