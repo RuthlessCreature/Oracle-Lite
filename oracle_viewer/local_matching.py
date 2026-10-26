@@ -323,6 +323,27 @@ def _blocked_views_from_geometry_diagnostic(diagnostic):
     return blocked
 
 
+def _source_visual_search_candidates(mesh,source_names,*,allowed_face_ids=None):
+    """Create a model-selectable atlas of exact CAD ray hits for XYZ-missing points."""
+    names=sorted({name for name in source_names if isinstance(name,str) and name})
+    if not names:
+        return []
+    candidates=distributed_surface_view_candidates(mesh,grid_size=14,
+        max_candidates_per_view=8)
+    if allowed_face_ids:
+        candidates=[row for row in candidates if row.get('face_id') in allowed_face_ids]
+    output=[]
+    for row in candidates:
+        choice=dict(row)
+        choice['id']=len(output)+1
+        choice['source_point_names']=names
+        choice['candidate_role']='global_surface_search'
+        choice['candidate_roles']=['global_surface_search','measurement_marker']
+        choice['feature']='proactive CAD ray-hit search option'
+        output.append(choice)
+    return output
+
+
 def _rigid_source_anchors(mesh, source_xyz, correspondence_xyz, *, max_fit_residual_mm=0.75,
                           max_surface_residual_mm=0.35):
     """Place a complete MSOP point group through one transform, preserving its geometry."""
@@ -2220,7 +2241,8 @@ def _merge_visual_marker_chunks(chunk_results, expected_chunks, *, fai):
 
 
 
-def _visual_chunk_contract_issues(parsed,expected_names,*,fai,surface_candidates=()):
+def _visual_chunk_contract_issues(parsed,expected_names,*,fai,surface_candidates=(),
+                                 require_candidate_ids=()):
     """Validate subset emission without choosing, deleting or moving a point."""
     if not isinstance(parsed,dict):return [{'reason':'invalid_json_object'}]
     if parsed.get('decision') not in ('AUTO_MARK','AUTOMARK') or _fai_number(parsed.get('fai'))!=fai:
@@ -2239,7 +2261,8 @@ def _visual_chunk_contract_issues(parsed,expected_names,*,fai,surface_candidates
             'missing':sorted(expected-set(names)),'outside_chunk':sorted(set(names)-expected),
             'duplicates':sorted({name for name in names if names.count(name)>1}),
             'expected_count':len(expected_names),'returned_name_count':len(names)})
-    issues.extend(_surface_candidate_selection_audit(parsed,list(surface_candidates)))
+    issues.extend(_surface_candidate_selection_audit(parsed,list(surface_candidates),
+        require_marker_ids=require_candidate_ids))
     return issues
 
 
@@ -2302,7 +2325,9 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
         total_tokens+=tokens
         parsed=_object(raw) or {}
         parsed,aliases=_normalize_model_source_aliases(parsed,source_points,allowed_source_pages)
-        issues=_visual_chunk_contract_issues(parsed,expected_names,fai=fai,surface_candidates=surface_candidates)
+        required_ids={name for name,values in options.items() if values}
+        issues=_visual_chunk_contract_issues(parsed,expected_names,fai=fai,
+            surface_candidates=surface_candidates,require_candidate_ids=required_ids)
         last_issues=issues
         attempts.append({'raw_output':raw,'truncated':bool(truncated),'generated_tokens':tokens,
             'source_name_aliases':aliases,'contract_issues':issues})
@@ -3144,10 +3169,18 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
         '最终还须通过整组实体复核；若点位不能从原图唯一辨认，返回 ABSTAIN。系统生成的 XYZ 是所选 CAD 交点坐标，'
         '不是 MSOP 原文坐标或计量认证。'
         if source_relation_visual_recovery else '')
+    visual_candidate_source_names=sorted(set(
+        source_manifest_audit.get('coordinate_evidence_missing') or []))
+    proactive_visual_instruction=(
+        'CAD六视图附有绿色候选编号；这些候选是CAD有效表面上的精确射线交点。对缺少MSOP XYZ的直接测点，必须按原文特征从候选图中选择candidate_id，'
+        '不能仅凭视图边缘猜UV或把辅助点名当作该测点。候选编号只证明射线命中CAD，不证明语义对应；整组刚体/表面及实体复核仍须通过。'
+        f'本次缺XYZ的直接测点：{json.dumps(visual_candidate_source_names,ensure_ascii=False)}。'
+        if visual_candidate_source_names else '')
     question=(
         VIEWER_LOCATION_TASK+
         '你是负责完成本次自动标记的本地模型；你现在有权依据随附的 MSOP 原页、2D工程图、已提取 XYZ 证据和当前 CAD 六视图图集自行提出并授权一个新的 FAI 级放置。无需等待外部或人工批准。'
         +visual_only_source_instruction+
+        proactive_visual_instruction+
         '此前的坐标变换或点组审核若被标为 rejected，表示该方案已被数值门限否决，不能沿用；它不代表这个 FAI 无法定位。'
         '若附图中有彩色 XYZ 叠加，那是已被数值门限拒绝的粗略搜索提示，只帮助找到对应 CAD 特征区域；不得将它当成已验证位置。必须重新给出稀疏配准参考和完整测量点归属，程序会独立拟合并校验。'
         '先从原文确认确切 FAI、被测特征和视图，再在 CAD 图集中选择能看到该特征的视图及特征中心位置。'
@@ -3225,16 +3258,25 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                         len(point.get('coordinate_variants') or []) for point in known_source_points))
     allowed_source_pages={page.get('page') for page in [*detail.get('methods',[]),*detail.get('dependencies',[])]
                           if isinstance(page.get('page'),int)}
+    surface_candidates=_source_visual_search_candidates(mesh,visual_candidate_source_names,
+        allowed_face_ids=allowed_part_faces)
+    candidate_required_source_names=set(visual_candidate_source_names)
+    if surface_candidates:
+        candidate_atlas=store._dir(project['id'])/'automatic-learning'/(
+            f"cad-proactive-candidate-atlas-{mesh['source_sha256'][:16]}-{item['number']}.png")
+        render_surface_candidate_atlas(atlas_path,candidate_atlas,surface_candidates)
+        # The candidate atlas already contains the full six-view CAD atlas;
+        # keep every source image and replace only the unnumbered CAD atlas.
+        model_images=list(dict.fromkeys([*images,str(candidate_atlas)]))
+    proactive_surface_candidates=list(surface_candidates)
     messages=[{'role':'user','content':question,'attachments':[{'filename':'MSOP, drawing, and active CAD orthographic atlas',
                                                                   'parsed_text':context,'images':model_images}]}]
     # Multiple point groups need iterative repair: fixing several missed rays
     # at once may leave one edge point unresolved, so allow another focused
     # local-model decision rather than terminating after only two retries.
     max_visual_attempts=6
-    surface_candidates=[]
-    candidate_required_source_names=set()
     visual_point_chunks=(_partition_visual_source_points(known_source_points,
-        required_marker_groups=required_marker_groups)
+        required_marker_groups=required_marker_groups,threshold=0)
         if required_marker_count==len(known_source_points) else [])
     visual_chunk_audit=[]
     for attempt in range(max_visual_attempts):
@@ -3836,7 +3878,7 @@ def _mark_visual_fallback(store, project, item, detail, model, mesh, candidate=N
                 'rigid_fit_scopes':{str(scope):{'max_residual_mm':fit.get('max_residual_mm')}
                                     for scope,fit in rigid_fits.items()}}
             retry_images=model_images
-            surface_candidates=[]
+            surface_candidates=list(proactive_surface_candidates)
             try:
                 focused_path=store._dir(project['id'])/'automatic-learning'/(
                     f"cad-focused-retry-{mesh['source_sha256'][:16]}-{item['number']}-{attempt+1}.png")

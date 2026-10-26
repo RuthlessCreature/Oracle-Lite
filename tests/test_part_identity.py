@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace
 from oracle_viewer.part_identity import cad_parts,select_physical_parts,_candidate_geometry_support
+from oracle_viewer.local_matching import _source_visual_search_candidates
 
 
 def mesh():
@@ -28,6 +29,16 @@ def test_part_screening_geometry_hints_keep_only_direct_fai_point_names():
     assert len(support)==1 and support[0]['name']=='P_DIRECT'
     assert support[0]['body_id']=='B2'
     assert support[0]['authority']=='prior_local_model_display_hypothesis_only'
+
+
+def test_xyz_missing_direct_point_gets_only_real_numbered_cad_ray_hits():
+    options=_source_visual_search_candidates(mesh(),['CIR_N1_VISION'])
+    assert options
+    assert [row['id'] for row in options]==list(range(1,len(options)+1))
+    assert all(row['candidate_role']=='global_surface_search'
+        and row['source_point_names']==['CIR_N1_VISION']
+        and row.get('face_id') is not None and row.get('position') is not None
+        for row in options)
 
 
 def test_only_native_exact_body_selection_is_accepted_and_never_marks_points(tmp_path):

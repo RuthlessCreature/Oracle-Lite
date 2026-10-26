@@ -379,6 +379,29 @@ def test_visual_point_partition_keeps_msop_measurement_groups_together_when_poss
         [f'P{i}' for i in range(9,19)]]
 
 
+def test_small_complete_measurement_groups_can_enter_candidate_id_repair_path():
+    points=[{'name':'R1_PNT_P2'},{'name':'S1_PNT_Z1'},{'name':'R1_PNT_Z3'}]
+    groups=[{'source_point_names':['R1_PNT_P2']},
+            {'source_point_names':['S1_PNT_Z1','R1_PNT_Z3']}]
+    chunks=_partition_visual_source_points(points,required_marker_groups=groups,threshold=0)
+    assert [[point['name'] for point in chunk] for chunk in chunks]==[
+        ['R1_PNT_P2','S1_PNT_Z1','R1_PNT_Z3']]
+
+
+def test_small_visual_chunk_requires_candidate_id_when_an_exact_hit_option_exists():
+    candidates=[{'id':7,'view_id':'+Z','uv':[.42,.5],
+        'source_point_names':['CIR_N1_VISION'],'candidate_role':'global_surface_search'}]
+    uv_only={'decision':'AUTO_MARK','fai':23,'markers':[{
+        'source_point_names':['CIR_N1_VISION'],'view_id':'+Z','uv':[.42,.5]}]}
+    rejected=local_matching._visual_chunk_contract_issues(uv_only,['CIR_N1_VISION'],
+        fai=23,surface_candidates=candidates,require_candidate_ids={'CIR_N1_VISION'})
+    assert any(issue.get('reason')=='explicit_valid_candidate_id_required' for issue in rejected)
+    chosen={'decision':'AUTO_MARK','fai':23,'markers':[{
+        'source_point_names':['CIR_N1_VISION'],'candidate_id':'C7'}]}
+    assert local_matching._visual_chunk_contract_issues(chosen,['CIR_N1_VISION'],
+        fai=23,surface_candidates=candidates,require_candidate_ids={'CIR_N1_VISION'})==[]
+
+
 def test_chunked_visual_outputs_merge_only_complete_disjoint_model_decisions():
     chunks=[['P1','P2'],['P3']]
     results=[
