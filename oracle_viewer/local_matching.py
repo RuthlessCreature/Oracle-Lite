@@ -2405,6 +2405,35 @@ def _explicit_coincident_xy_z_distance_pairs(methods,source_points):
     return result
 
 
+def _source_xy_layout_evidence(source_points,expected_names):
+    """Summarize only literal, same-page MSOP XY rows for joint CAD matching."""
+    expected=set(expected_names);groups={}
+    for point in source_points or []:
+        name=point.get('name') if isinstance(point,dict) else None
+        coord=point.get('source_coordinates_2d') if isinstance(point,dict) else None
+        if name not in expected or not isinstance(coord,dict) or coord.get('axes')!=['X','Y']:
+            continue
+        values=coord.get('values')
+        try:xy=np.asarray(values,dtype=float)
+        except (TypeError,ValueError):continue
+        if xy.shape!=(2,) or not np.isfinite(xy).all():continue
+        key=(coord.get('page'),coord.get('coordinate_system'))
+        groups.setdefault(key,[]).append({'name':name,'xy_mm':xy.tolist()})
+    evidence=[]
+    for (page,coordinate_system),rows in groups.items():
+        rows=sorted(rows,key=lambda row:row['name'])
+        if len(rows)<2:continue
+        distances=[]
+        for index,left in enumerate(rows):
+            for right in rows[index+1:]:
+                distances.append({'points':[left['name'],right['name']],
+                    'xy_distance_mm':round(float(np.linalg.norm(
+                        np.asarray(left['xy_mm'])-np.asarray(right['xy_mm']))),4)})
+        evidence.append({'source_page':page,'coordinate_system':coordinate_system,
+            'points':rows,'pairwise_xy_distances':distances})
+    return evidence
+
+
 def _explicit_source_point_relations(methods,source_point_names):
     """Read explicit MSOP point-to-point expressions into atomic inference groups."""
     names=set(name for name in source_point_names if isinstance(name,str) and name)
@@ -2602,6 +2631,7 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
         for view in candidate.get('blocked_view_ids_by_source_name',{}).get(name,[])})
         for name in expected_names}
     blocked={name:views for name,views in blocked.items() if views}
+    source_xy_layout=_source_xy_layout_evidence(source_points,expected_names)
     contract=('\nCurrent subset output contract: markers must cover ONLY '+json.dumps(expected_names)+
         ', each name exactly once. Do not add a point from another subset to close a loop or build a plane. '+
         'Full-group totals in the source apply after the service merges all subsets. '+
@@ -2609,7 +2639,14 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
         'Per-point CAD candidate IDs (search hints, not proof of entity identity): '+json.dumps(options)+'. '+
         ('For these source points the prior view collapsed distinct XYZ depths and is forbidden; choose a different view: '+
          json.dumps(blocked)+'. The service will reject the forbidden view even if you return raw UV. '
-         if blocked else ''))
+         if blocked else '')+
+        ('Literal MSOP XY layout evidence (mm; same source page/system only): '+
+         json.dumps(source_xy_layout,ensure_ascii=False,separators=(',',':'))+'. Treat this as a joint pattern: '
+         'preserve the complete pairwise XY-distance layout under one common in-plane rigid transform, allowing '
+         'axis reversal when the drawing/CAD axes differ. Select all point candidates together; do not map each '
+         'point independently to a convenient central hit. For documented equal-XY Z-distance pairs, keep the '
+         'two selected hits aligned in-plane but on distinct supported CAD surfaces. These XY rows do not provide Z. '
+         if source_xy_layout else ''))
     base={**message,'content':message['content']+contract}
     current=base;attempts=[];total_tokens=0;last_issues=[]
     for index in range(max_repairs+1):
@@ -2632,7 +2669,11 @@ def _request_visual_marker_chunk(model,message,*,fai,expected_names,source_point
                 compact['content']+=('\nThis is chunk '+json.dumps(expected_names,ensure_ascii=False)+
                     ' only; emit each listed source point once and no other point. '
                     'Per-point eligible CAD candidate IDs: '+json.dumps(options,ensure_ascii=False,
-                        separators=(',',':'))+'.')
+                        separators=(',',':'))+'.'+
+                    ((' Use this literal MSOP XY point pattern jointly, preserving its pairwise layout under one '
+                      'common in-plane rigid transform and keeping documented equal-XY Z pairs on distinct supported '
+                      'surfaces: '+json.dumps(source_xy_layout,ensure_ascii=False,separators=(',',':'))+'. XY does '
+                      'not supply Z.') if source_xy_layout else ''))
                 request_messages=[compact]
                 request_budget=_complete_visual_context_budget(request_messages)
                 current=compact

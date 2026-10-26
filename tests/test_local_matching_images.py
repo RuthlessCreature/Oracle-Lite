@@ -166,6 +166,23 @@ def test_cloned_source_scoped_candidate_ids_cannot_hide_duplicate_physical_hits(
         if row.get('reason')=='duplicate_physical_surface_for_distinct_markers'])==1
 
 
+def test_source_xy_layout_evidence_keeps_literal_coordinates_and_pair_distances():
+    points=[
+        {'name':'J01','source_coordinates_2d':{'axes':['X','Y'],'values':[-2.,3.],
+            'page':14,'coordinate_system':'ALI_ABC'}},
+        {'name':'A01','source_coordinates_2d':{'axes':['X','Y'],'values':[-2.,3.],
+            'page':14,'coordinate_system':'ALI_ABC'}},
+        {'name':'OTHER','source_coordinates_2d':{'axes':['X','Y'],'values':[900.,900.],
+            'page':15,'coordinate_system':'OTHER'}},
+        {'name':'NO_XY','source_coordinates_2d':{'axes':['X','Y'],'values':[1.,None],
+            'page':14,'coordinate_system':'ALI_ABC'}},
+    ]
+    evidence=local_matching._source_xy_layout_evidence(points,['J01','A01','NO_XY'])
+    assert evidence==[{'source_page':14,'coordinate_system':'ALI_ABC',
+        'points':[{'name':'A01','xy_mm':[-2.,3.]},{'name':'J01','xy_mm':[-2.,3.]}],
+        'pairwise_xy_distances':[{'points':['A01','J01'],'xy_distance_mm':0.0}]}]
+
+
 def test_duplicate_surface_retry_increases_temperature_and_uses_alternative_hits():
     candidates=[
         {'id':1,'view_id':'+Z','uv':[.45,.45],'position':[1.,2.,3.],'source_point_names':['J01']},
@@ -183,7 +200,9 @@ def test_duplicate_surface_retry_increases_temperature_and_uses_alternative_hits
     ]
     class Model:
         temperatures=[]
+        messages=[]
         def _generate_once(self,_messages,**kwargs):
+            self.messages.append(_messages[0]['content'])
             self.temperatures.append(kwargs['temperature'])
             return json.dumps(outputs[len(self.temperatures)-1]),False,120
     model=Model()
@@ -191,11 +210,17 @@ def test_duplicate_surface_retry_increases_temperature_and_uses_alternative_hits
         'attachments':[{'filename':'MSOP and CAD','parsed_text':'MSOP p.14','images':[]}]}
     parsed,_,truncated,_,_,attempts=local_matching._request_visual_marker_chunk(
         model,message,fai=9,expected_names=['J01','A01'],
-        source_points=[{'name':'J01'},{'name':'A01'}],allowed_source_pages={14},
+        source_points=[{'name':'J01','source_coordinates_2d':{'axes':['X','Y'],'values':[1.,2.],
+                'page':14,'coordinate_system':'ALI_ABC'}},
+            {'name':'A01','source_coordinates_2d':{'axes':['X','Y'],'values':[1.,2.],
+                'page':14,'coordinate_system':'ALI_ABC'}}],allowed_source_pages={14},
         surface_candidates=candidates)
     assert not truncated
     assert [row['candidate_id'] for row in parsed['markers']]==['C3','C4']
     assert model.temperatures==[0.0,0.18]
+    assert 'pairwise_xy_distances' in model.messages[0]
+    assert 'Use the per-point alternative' in model.messages[1]
+    assert 'common in-plane rigid transform' in model.messages[1]
     assert attempts[0]['contract_issues'][0]['members'][0]['alternative_candidates'][0]['candidate_id']=='C3'
 
 
