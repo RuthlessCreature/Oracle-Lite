@@ -234,8 +234,22 @@ def validate(raw,tasks,routes,cat,constraints,mesh_file=None):
                 if not isinstance(setup.get(field),str) or not setup[field].strip():
                     raise ValueError('Setup needs fixture state, motion and acquisition sequence')
             devices=setup.get('device_ids')
-            if not isinstance(devices,list) or len(set(devices))!=len(devices) or any(d not in items for d in devices):
-                raise ValueError('Unknown or duplicate catalogue device')
+            if not isinstance(devices,list):
+                raise ValueError('Setup '+uid+' in station '+sid+': device_ids must be a list')
+            invalid_positions=[index for index,device in enumerate(devices) if not isinstance(device,str) or not device]
+            known_device_ids=[device for device in devices if isinstance(device,str) and device]
+            seen=set();duplicates=set()
+            for device in known_device_ids:
+                if device in seen:duplicates.add(device)
+                else:seen.add(device)
+            unknown=sorted(device for device in seen if device not in items)
+            if invalid_positions or duplicates or unknown:
+                # Preserve strict rejection. Never replace an invalid model ID with a guessed device.
+                raise ValueError('Setup '+uid+' in station '+sid+': Unknown or duplicate catalogue device; '+
+                                 'unknown_ids='+repr([d[:96] for d in unknown[:12]])+
+                                 ', duplicate_ids='+repr([d[:96] for d in sorted(duplicates)[:12]])+
+                                 ', invalid_id_positions='+repr(invalid_positions[:12])+
+                                 ', catalogue_size='+str(len(items)))
             kinds={items[d]['kind'] for d in devices};gaps=[]
             if channel=='2d_vision':
                 cams=[items[d] for d in devices if items[d]['kind']=='camera']

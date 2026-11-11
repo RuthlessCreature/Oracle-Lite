@@ -225,3 +225,28 @@ def test_duplicate_whole_groups_are_decided_by_local_model_and_expanded_lossless
     assert receipt['assignments']==[dict(number=n,setup_id='U2') for n in (1,2,3)]
     assert receipt['removed_empty_setup_ids']==['U1']
     assert module.validate(fixed,tasks,routes,library(),{})['coverage']['assigned']==3
+
+
+@pytest.mark.parametrize(('device_ids','error_fragment'), [
+    (['nonexistent-camera-id'], "unknown_ids=['nonexistent-camera-id']"),
+    (['MV-DP3020-01H','MV-DP3020-01H'], "duplicate_ids=['MV-DP3020-01H']"),
+    ([None], "invalid_id_positions=[0]"),
+    ('MV-DP3020-01H', 'device_ids must be a list'),
+])
+def test_station_invalid_catalogue_device_has_actionable_context(device_ids,error_fragment):
+    tasks,routes,raw=fixture()
+    raw['stations'][0]['setups'][0]['device_ids']=device_ids
+    with pytest.raises(ValueError) as exc:
+        validate(raw,tasks,routes,library(),{})
+    message=str(exc.value)
+    assert 'Setup U1 in station S1' in message
+    assert error_fragment in message
+
+
+def test_station_validation_does_not_mutate_raw_on_bad_device_id():
+    tasks,routes,raw=fixture()
+    raw['stations'][0]['setups'][0]['device_ids']=['not-a-catalogue-device']
+    original=copy.deepcopy(raw)
+    with pytest.raises(ValueError,match='unknown_ids'):
+        validate(raw,tasks,routes,library(),{})
+    assert raw==original
